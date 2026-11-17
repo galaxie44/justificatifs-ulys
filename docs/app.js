@@ -26,20 +26,19 @@ async function api(path, options = {}) {
     ...options,
     headers: {
       ...headers(options.headers || {}),
-      ...(options.body ? { "Content-Type": "application/json", Prefer: "return=representation" } : {}),
+      ...(options.body
+        ? { "Content-Type": "application/json", Prefer: "return=representation" }
+        : {}),
     },
   });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || res.statusText);
-  }
+  if (!res.ok) throw new Error((await res.text()) || res.statusText);
   if (res.status === 204) return null;
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) return null;
   return res.json();
 }
 
-function token() {
+function newToken() {
   const arr = new Uint8Array(18);
   crypto.getRandomValues(arr);
   return btoa(String.fromCharCode(...arr))
@@ -48,7 +47,7 @@ function token() {
     .replace(/=+$/, "");
 }
 
-function parseUlysText(text, filename) {
+function parseUlysText(text) {
   const lines = text
     .split(/\r?\n/)
     .map((l) => l.trim())
@@ -67,23 +66,20 @@ function parseUlysText(text, filename) {
     parseFloat(m[1].replace(",", "."))
   );
   const badgeMatch = text.match(/\b(\d{3}\s+\d{2}\s+\d{7}\s+\d{5})\b/);
-  const classe = lines.find((l) => /^\d+$/.test(l)) || "";
-  const formule =
-    lines.find((l) => /classic|premium|liber-t/i.test(l) && !/formule/i.test(l)) ||
-    "Classic";
   return {
     date_raw,
     date_iso,
     entree: plazas[0] || "",
     sortie: plazas[1] || "",
     km: kmLine ? parseFloat(kmLine.replace(",", ".")) : null,
-    classe_tarif: classe,
+    classe_tarif: lines.find((l) => /^\d+$/.test(l)) || "",
     prix_ttc: money[0] ?? null,
     prix_ht: money[1] ?? null,
     tva: money[2] ?? null,
-    formule,
+    formule:
+      lines.find((l) => /classic|premium|liber-t/i.test(l) && !/formule/i.test(l)) ||
+      "Classic",
     badge: badgeMatch ? badgeMatch[1] : "",
-    original_filename: filename,
   };
 }
 
@@ -104,321 +100,6 @@ async function extractPdfText(file) {
   return text;
 }
 
-function route() {
-  const hash = location.hash.replace(/^#/, "") || "/";
-  const publicMatch = hash.match(/^\/j\/([^/]+)/);
-  if (publicMatch) return renderPublic(decodeURIComponent(publicMatch[1]));
-  const dossierMatch = hash.match(/^\/dossiers\/(\d+)/);
-  if (dossierMatch) return renderDossier(Number(dossierMatch[1]));
-  return renderHome();
-}
-
-async function listDossiers() {
-  const dossiers =
-    (await api("dossiers?select=*&order=updated_at.desc")) || [];
-  const enriched = [];
-  for (const d of dossiers) {
-    const receipts =
-      (await api(`receipts?dossier_id=eq.${d.id}&select=prix_ttc,km`)) || [];
-    enriched.push({
-      ...d,
-      receipt_count: receipts.length,
-      total_ttc: receipts.reduce((s, r) => s + (r.prix_ttc || 0), 0),
-    });
-  }
-  return enriched;
-}
-
-async function getStats(dossierId) {
-  const rows =
-    (await api(`receipts?dossier_id=eq.${dossierId}&select=*`)) || [];
-  rows.sort((a, b) =>
-    String(a.date_iso || a.created_at).localeCompare(String(b.date_iso || b.created_at))
-  );
-  return {
-    count: rows.length,
-    total_ttc: rows.reduce((s, r) => s + (r.prix_ttc || 0), 0),
-    total_ht: rows.reduce((s, r) => s + (r.prix_ht || 0), 0),
-    total_tva: rows.reduce((s, r) => s + (r.tva || 0), 0),
-    total_km: rows.reduce((s, r) => s + (r.km || 0), 0),
-    receipts: rows,
-  };
-}
-
-function shell(title, subtitle, body, actions = "") {
-  app.innerHTML = `
-    <div class="topbar">
-      <div class="brand">
-        <div class="brand-mark">JU</div>
-        <div>
-          <h1>${title}</h1>
-          <p>${subtitle}</p>
-        </div>
-      </div>
-      <div class="actions">${actions}</div>
-    </div>
-    ${body}
-  `;
-}
-
-async function renderHome() {
-  shell(
-    "Justificatifs Ulys",
-    "Uploadez vos reçus · partagez un justificatif sans compte Ulys",
-    `<div class="empty">Chargement…</div>`
-  );
-  try {
-    const dossiers = await listDossiers();
-    shell(
-      "Justificatifs Ulys",
-      "Uploadez vos reçus · partagez un justificatif sans compte Ulys",
-      `
-      <div class="grid-2">
-        <section class="card">
-          <h2 style="margin-top:0">Dossiers</h2>
-          ${
-            dossiers.length
-              ? `<div class="table-wrap"><table>
-                <thead><tr><th>Titre</th><th>Trajets</th><th>Total TTC</th><th></th></tr></thead>
-                <tbody>
-                  ${dossiers
-                    .map(
-                      (d) => `<tr>
-                    <td><a href="#/dossiers/${d.id}"><strong>${escapeHtml(d.title)}</strong></a>
-                      ${d.description ? `<div class="muted small">${escapeHtml(String(d.description).slice(0, 80))}</div>` : ""}
-                    </td>
-                    <td><span class="pill">${d.receipt_count}</span></td>
-                    <td>${euro(d.total_ttc)}</td>
-                    <td><a class="btn btn-secondary" href="#/dossiers/${d.id}">Ouvrir</a></td>
-                  </tr>`
-                    )
-                    .join("")}
-                </tbody></table></div>`
-              : `<div class="empty">Aucun dossier pour l’instant. Créez-en un à droite.</div>`
-          }
-        </section>
-        <section class="card">
-          <h2 style="margin-top:0">Nouveau dossier</h2>
-          <p class="muted small">Ex. « Note de frais novembre 2026 ».</p>
-          <form id="createForm">
-            <div class="field"><label>Titre</label><input name="title" required placeholder="Note de frais — Novembre 2026" /></div>
-            <div class="field"><label>Contexte (visible publiquement)</label><textarea name="description" placeholder="Déplacements professionnels A63…"></textarea></div>
-            <button class="btn btn-primary" type="submit">Créer le dossier</button>
-          </form>
-        </section>
-      </div>`
-    );
-    document.getElementById("createForm").onsubmit = async (e) => {
-      e.preventDefault();
-      const fd = new FormData(e.target);
-      const rows = await api("dossiers", {
-        method: "POST",
-        body: JSON.stringify({
-          title: String(fd.get("title")).trim(),
-          description: String(fd.get("description") || "").trim(),
-          share_token: token(),
-        }),
-      });
-      location.hash = `#/dossiers/${rows[0].id}`;
-    };
-  } catch (err) {
-    shell(
-      "Justificatifs Ulys",
-      "Erreur",
-      `<div class="error">${escapeHtml(err.message || String(err))}</div>`
-    );
-  }
-}
-
-async function renderDossier(id) {
-  shell("Dossier", `<a href="#/">← Retour</a>`, `<div class="empty">Chargement…</div>`);
-  try {
-    const dossiers = await api(`dossiers?id=eq.${id}&select=*`);
-    const dossier = dossiers?.[0];
-    if (!dossier) {
-      shell("Introuvable", "", `<div class="error">Dossier introuvable. <a href="#/">Retour</a></div>`);
-      return;
-    }
-    const stats = await getStats(id);
-    const shareUrl = `${location.origin}${location.pathname.replace(/\/$/, "")}/#/j/${dossier.share_token}`;
-
-    shell(
-      escapeHtml(dossier.title),
-      `<a href="#/">← Tous les dossiers</a>`,
-      `
-    <div class="notice">Partagez le lien ci-dessous. Aucun accès au compte Ulys n’est requis.</div>
-    <section class="card" style="margin-bottom:1rem">
-      <h2 style="margin-top:0">Lien public de justification</h2>
-      <div class="share-box">
-        <input id="shareUrl" readonly value="${escapeAttr(shareUrl)}" />
-        <button class="btn btn-secondary" type="button" id="copyBtn">Copier</button>
-        <a class="btn btn-accent" href="#/j/${escapeAttr(dossier.share_token)}">Voir le justificatif</a>
-      </div>
-    </section>
-    <div class="stats">
-      <div class="stat"><span>Trajets</span><strong>${stats.count}</strong></div>
-      <div class="stat"><span>Kilomètres</span><strong>${km(stats.total_km)}</strong></div>
-      <div class="stat"><span>Total HT</span><strong>${euro(stats.total_ht)}</strong></div>
-      <div class="stat"><span>Total TTC</span><strong>${euro(stats.total_ttc)}</strong></div>
-    </div>
-    <div class="grid-2">
-      <section class="card">
-        <h2 style="margin-top:0">Ajouter des reçus Ulys (PDF)</h2>
-        <form id="uploadForm">
-          <div class="field"><label>Fichiers PDF</label><input name="files" type="file" accept="application/pdf,.pdf" multiple required /></div>
-          <div class="field"><label>Motif par défaut</label><input name="motif" placeholder="Déplacement professionnel" /></div>
-          <button class="btn btn-primary" type="submit">Importer et analyser</button>
-          <p id="uploadStatus" class="muted small"></p>
-        </form>
-      </section>
-      <section class="card">
-        <h2 style="margin-top:0">Infos du dossier</h2>
-        <form id="editForm">
-          <div class="field"><label>Titre</label><input name="title" value="${escapeAttr(dossier.title)}" required /></div>
-          <div class="field"><label>Description</label><textarea name="description">${escapeHtml(dossier.description || "")}</textarea></div>
-          <div class="actions">
-            <button class="btn btn-secondary" type="submit">Enregistrer</button>
-            <button class="btn btn-danger" type="button" id="deleteDossier">Supprimer</button>
-          </div>
-        </form>
-      </section>
-    </div>
-    <section class="card" style="margin-top:1rem">
-      <h2 style="margin-top:0">Trajets importés</h2>
-      ${
-        stats.receipts.length
-          ? `<div class="table-wrap"><table>
-            <thead><tr><th>Date</th><th>Trajet</th><th>Km</th><th>TTC</th><th>Motif</th><th>Reçu</th><th></th></tr></thead>
-            <tbody>
-              ${stats.receipts
-                .map(
-                  (r) => `<tr>
-                <td>${escapeHtml(r.date_raw || "—")}</td>
-                <td class="route">${escapeHtml(r.entree || "?")} <span>→</span> ${escapeHtml(r.sortie || "?")}</td>
-                <td>${km(r.km)}</td>
-                <td><strong>${euro(r.prix_ttc)}</strong></td>
-                <td>
-                  <form class="motif-inline" data-id="${r.id}">
-                    <input name="motif" value="${escapeAttr(r.motif || "")}" />
-                    <button class="btn btn-secondary" type="submit">OK</button>
-                  </form>
-                </td>
-                <td><a href="${publicPdfUrl(r.stored_filename)}" target="_blank" rel="noopener">PDF</a></td>
-                <td><button class="btn btn-danger" data-del="${r.id}" data-file="${escapeAttr(r.stored_filename)}" type="button">×</button></td>
-              </tr>`
-                )
-                .join("")}
-            </tbody></table></div>`
-          : `<div class="empty">Importez vos PDF Ulys pour constituer le justificatif.</div>`
-      }
-    </section>`
-    );
-
-    document.getElementById("copyBtn").onclick = async () => {
-      await navigator.clipboard.writeText(shareUrl);
-      document.getElementById("copyBtn").textContent = "Copié";
-    };
-
-    document.getElementById("editForm").onsubmit = async (e) => {
-      e.preventDefault();
-      const fd = new FormData(e.target);
-      await api(`dossiers?id=eq.${id}`, {
-        method: "PATCH",
-        headers: { Prefer: "return=minimal" },
-        body: JSON.stringify({
-          title: String(fd.get("title")).trim(),
-          description: String(fd.get("description") || "").trim(),
-          updated_at: new Date().toISOString(),
-        }),
-      });
-      route();
-    };
-
-    document.getElementById("deleteDossier").onclick = async () => {
-      if (!confirm("Supprimer ce dossier et tous ses PDF ?")) return;
-      for (const r of stats.receipts) {
-        await deleteStorage(r.stored_filename);
-      }
-      await api(`dossiers?id=eq.${id}`, { method: "DELETE" });
-      location.hash = "#/";
-    };
-
-    document.querySelectorAll("form.motif-inline").forEach((form) => {
-      form.onsubmit = async (e) => {
-        e.preventDefault();
-        const rid = Number(form.dataset.id);
-        await api(`receipts?id=eq.${rid}`, {
-          method: "PATCH",
-          headers: { Prefer: "return=minimal" },
-          body: JSON.stringify({ motif: form.motif.value.trim() }),
-        });
-        route();
-      };
-    });
-
-    document.querySelectorAll("[data-del]").forEach((btn) => {
-      btn.onclick = async () => {
-        if (!confirm("Supprimer ce reçu ?")) return;
-        await deleteStorage(btn.dataset.file);
-        await api(`receipts?id=eq.${btn.dataset.del}`, { method: "DELETE" });
-        route();
-      };
-    });
-
-    document.getElementById("uploadForm").onsubmit = async (e) => {
-      e.preventDefault();
-      const fd = new FormData(e.target);
-      const files = [...fd.getAll("files")].filter((f) => f && f.name);
-      const motif = String(fd.get("motif") || "").trim();
-      const status = document.getElementById("uploadStatus");
-      let ok = 0;
-      for (const file of files) {
-        status.textContent = `Analyse de ${file.name}…`;
-        if (!file.name.toLowerCase().endsWith(".pdf")) continue;
-        try {
-          const text = await extractPdfText(file);
-          const parsed = parseUlysText(text, file.name);
-          const stored = `${crypto.randomUUID()}.pdf`;
-          await uploadStorage(stored, file);
-          await api("receipts", {
-            method: "POST",
-            body: JSON.stringify({
-              dossier_id: id,
-              stored_filename: stored,
-              original_filename: file.name,
-              date_raw: parsed.date_raw,
-              date_iso: parsed.date_iso,
-              entree: parsed.entree,
-              sortie: parsed.sortie,
-              km: parsed.km,
-              classe_tarif: parsed.classe_tarif,
-              prix_ht: parsed.prix_ht,
-              tva: parsed.tva,
-              prix_ttc: parsed.prix_ttc,
-              formule: parsed.formule,
-              badge: parsed.badge,
-              motif,
-            }),
-          });
-          ok += 1;
-        } catch (err) {
-          console.error(err);
-          status.textContent = `Erreur sur ${file.name}: ${err.message || err}`;
-        }
-      }
-      await api(`dossiers?id=eq.${id}`, {
-        method: "PATCH",
-        headers: { Prefer: "return=minimal" },
-        body: JSON.stringify({ updated_at: new Date().toISOString() }),
-      });
-      status.textContent = `${ok} reçu(s) importé(s).`;
-      route();
-    };
-  } catch (err) {
-    shell("Erreur", `<a href="#/">Retour</a>`, `<div class="error">${escapeHtml(err.message || String(err))}</div>`);
-  }
-}
-
 function publicPdfUrl(path) {
   return `${SUPABASE_URL}/storage/v1/object/public/receipts/${path}`;
 }
@@ -435,71 +116,23 @@ async function uploadStorage(path, file) {
   if (!res.ok) throw new Error(await res.text());
 }
 
-async function deleteStorage(path) {
-  await fetch(`${SUPABASE_URL}/storage/v1/object/receipts`, {
-    method: "DELETE",
-    headers: headers({ "Content-Type": "application/json" }),
-    body: JSON.stringify([path]),
-  });
+async function getStats(dossierId) {
+  const rows = (await api(`receipts?dossier_id=eq.${dossierId}&select=*`)) || [];
+  rows.sort((a, b) =>
+    String(a.date_iso || a.created_at).localeCompare(String(b.date_iso || b.created_at))
+  );
+  return {
+    count: rows.length,
+    total_ttc: rows.reduce((s, r) => s + (r.prix_ttc || 0), 0),
+    total_ht: rows.reduce((s, r) => s + (r.prix_ht || 0), 0),
+    total_tva: rows.reduce((s, r) => s + (r.tva || 0), 0),
+    total_km: rows.reduce((s, r) => s + (r.km || 0), 0),
+    receipts: rows,
+  };
 }
 
-async function renderPublic(shareToken) {
-  shell("Justificatif", "Chargement…", `<div class="empty">Chargement…</div>`);
-  try {
-    const dossiers = await api(
-      `dossiers?share_token=eq.${encodeURIComponent(shareToken)}&select=*`
-    );
-    const dossier = dossiers?.[0];
-    if (!dossier) {
-      shell("Lien invalide", "", `<div class="error">Ce justificatif est introuvable.</div>`);
-      return;
-    }
-    const stats = await getStats(dossier.id);
-    shell(
-      "Justificatif de frais de péage",
-      "Document partagé · aucune connexion Ulys requise",
-      `
-    <section class="card">
-      <h2 style="margin:0 0 0.35rem">${escapeHtml(dossier.title)}</h2>
-      ${dossier.description ? `<p class="muted" style="white-space:pre-wrap;margin-top:0">${escapeHtml(dossier.description)}</p>` : ""}
-      <div class="stats">
-        <div class="stat"><span>Trajets</span><strong>${stats.count}</strong></div>
-        <div class="stat"><span>Kilomètres</span><strong>${km(stats.total_km)}</strong></div>
-        <div class="stat"><span>Total HT</span><strong>${euro(stats.total_ht)}</strong></div>
-        <div class="stat"><span>Total TTC</span><strong>${euro(stats.total_ttc)}</strong></div>
-      </div>
-      ${
-        stats.receipts.length
-          ? `<div class="table-wrap"><table>
-            <thead><tr><th>Date</th><th>Entrée</th><th>Sortie</th><th>Km</th><th>HT</th><th>TVA</th><th>TTC</th><th>Motif</th><th class="no-print">Pièce</th></tr></thead>
-            <tbody>
-              ${stats.receipts
-                .map(
-                  (r) => `<tr>
-                <td>${escapeHtml(r.date_raw || "—")}</td>
-                <td>${escapeHtml(r.entree || "—")}</td>
-                <td>${escapeHtml(r.sortie || "—")}</td>
-                <td>${km(r.km)}</td>
-                <td>${euro(r.prix_ht)}</td>
-                <td>${euro(r.tva)}</td>
-                <td><strong>${euro(r.prix_ttc)}</strong></td>
-                <td>${escapeHtml(r.motif || "—")}</td>
-                <td class="no-print"><a class="btn btn-secondary" href="${publicPdfUrl(r.stored_filename)}" target="_blank" rel="noopener">Reçu PDF</a></td>
-              </tr>`
-                )
-                .join("")}
-            </tbody></table></div>`
-          : `<div class="empty">Aucun trajet.</div>`
-      }
-    </section>
-    <p class="muted small" style="margin-top:1rem">
-      Montants issus des reçus informatifs Ulys. Ce lien ne donne aucun accès au compte Ulys.
-    </p>`,
-      `<button class="btn btn-ghost no-print" type="button" onclick="window.print()">Imprimer</button>`
-    );
-  } catch (err) {
-    shell("Erreur", "", `<div class="error">${escapeHtml(err.message || String(err))}</div>`);
-  }
+function shareUrl(token) {
+  return `${location.origin}${location.pathname.replace(/\/$/, "")}/#/j/${token}`;
 }
 
 function escapeHtml(s) {
@@ -511,6 +144,289 @@ function escapeHtml(s) {
 }
 function escapeAttr(s) {
   return escapeHtml(s).replaceAll("'", "&#39;");
+}
+
+function autoTitle() {
+  const d = new Date();
+  return `Note de frais — ${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
+}
+
+async function importFiles(files, { dossierId = null, motif = "Déplacement professionnel", title = null } = {}) {
+  const pdfs = [...files].filter((f) => f && f.name && f.name.toLowerCase().endsWith(".pdf"));
+  if (!pdfs.length) throw new Error("Choisissez au moins un PDF Ulys.");
+
+  let dossier = null;
+  if (dossierId) {
+    const rows = await api(`dossiers?id=eq.${dossierId}&select=*`);
+    dossier = rows?.[0];
+    if (!dossier) throw new Error("Dossier introuvable.");
+  } else {
+    const created = await api("dossiers", {
+      method: "POST",
+      body: JSON.stringify({
+        title: title || autoTitle(),
+        description: "Justificatif de frais de péage Ulys.",
+        share_token: newToken(),
+      }),
+    });
+    dossier = created[0];
+  }
+
+  let ok = 0;
+  for (const file of pdfs) {
+    const text = await extractPdfText(file);
+    const parsed = parseUlysText(text);
+    const stored = `${crypto.randomUUID()}.pdf`;
+    await uploadStorage(stored, file);
+    await api("receipts", {
+      method: "POST",
+      body: JSON.stringify({
+        dossier_id: dossier.id,
+        stored_filename: stored,
+        original_filename: file.name,
+        ...parsed,
+        motif,
+      }),
+    });
+    ok += 1;
+  }
+
+  await api(`dossiers?id=eq.${dossier.id}`, {
+    method: "PATCH",
+    headers: { Prefer: "return=minimal" },
+    body: JSON.stringify({ updated_at: new Date().toISOString() }),
+  });
+
+  return { dossier, ok };
+}
+
+function route() {
+  const hash = location.hash.replace(/^#/, "") || "/";
+  const pub = hash.match(/^\/j\/([^/]+)/);
+  if (pub) return renderPublic(decodeURIComponent(pub[1]));
+  const dos = hash.match(/^\/d\/(\d+)/);
+  if (dos) return renderResult(Number(dos[1]));
+  return renderHome();
+}
+
+function renderHome() {
+  app.innerHTML = `
+    <div class="hero">
+      <div class="mark">JU</div>
+      <h1>Justificatif Ulys</h1>
+      <p>1. Déposez vos PDF&nbsp;&nbsp;2. Copiez le lien</p>
+    </div>
+
+    <div class="drop" id="drop">
+      <strong>Déposez vos reçus PDF ici</strong>
+      <span>ou touchez pour choisir les fichiers</span>
+      <input id="files" type="file" accept="application/pdf,.pdf" multiple />
+    </div>
+
+    <div class="field">
+      <label for="motif">Motif (optionnel)</label>
+      <input id="motif" value="Déplacement professionnel" />
+    </div>
+
+    <p class="status" id="status"></p>
+    <p class="footer-note">Vos destinataires voient le récapitulatif et les PDF.<br/>Ils n’ont pas besoin de votre compte Ulys.</p>
+  `;
+
+  const drop = document.getElementById("drop");
+  const input = document.getElementById("files");
+  const status = document.getElementById("status");
+
+  const run = async (fileList) => {
+    status.className = "status";
+    status.textContent = "Analyse en cours…";
+    drop.style.pointerEvents = "none";
+    try {
+      const motif = document.getElementById("motif").value.trim() || "Déplacement professionnel";
+      const { dossier, ok } = await importFiles(fileList, { motif });
+      status.className = "status ok";
+      status.textContent = `${ok} reçu(s) prêt(s)`;
+      location.hash = `#/d/${dossier.id}`;
+    } catch (err) {
+      status.className = "status err";
+      status.textContent = err.message || String(err);
+      drop.style.pointerEvents = "";
+    }
+  };
+
+  drop.onclick = () => input.click();
+  input.onchange = () => {
+    if (input.files?.length) run(input.files);
+  };
+  drop.ondragover = (e) => {
+    e.preventDefault();
+    drop.classList.add("drag");
+  };
+  drop.ondragleave = () => drop.classList.remove("drag");
+  drop.ondrop = (e) => {
+    e.preventDefault();
+    drop.classList.remove("drag");
+    if (e.dataTransfer.files?.length) run(e.dataTransfer.files);
+  };
+}
+
+async function renderResult(id) {
+  app.innerHTML = `<div class="center muted" style="padding:2rem">Chargement…</div>`;
+  try {
+    const rows = await api(`dossiers?id=eq.${id}&select=*`);
+    const dossier = rows?.[0];
+    if (!dossier) {
+      app.innerHTML = `<div class="card center"><p>Introuvable.</p><a class="btn btn-primary" href="#/">Recommencer</a></div>`;
+      return;
+    }
+    const stats = await getStats(id);
+    const link = shareUrl(dossier.share_token);
+
+    app.innerHTML = `
+      <div class="top-simple">
+        <h1>C’est prêt</h1>
+        <a class="btn btn-ghost no-print" href="#/">Nouveau</a>
+      </div>
+
+      <div class="card">
+        <p class="muted small" style="margin-top:0">Envoyez ce lien — sans accès à votre compte Ulys</p>
+        <div class="share">
+          <input id="shareUrl" readonly value="${escapeAttr(link)}" />
+          <button class="btn btn-primary btn-lg" type="button" id="copyBtn">Copier le lien</button>
+          <a class="btn btn-secondary" href="#/j/${escapeAttr(dossier.share_token)}">Voir comme eux</a>
+        </div>
+      </div>
+
+      <div class="stats">
+        <div class="stat"><span>Trajets</span><strong>${stats.count}</strong></div>
+        <div class="stat"><span>Km</span><strong>${km(stats.total_km)}</strong></div>
+        <div class="stat"><span>HT</span><strong>${euro(stats.total_ht)}</strong></div>
+        <div class="stat"><span>TTC</span><strong>${euro(stats.total_ttc)}</strong></div>
+      </div>
+
+      <div class="card">
+        ${
+          stats.receipts.length
+            ? stats.receipts
+                .map(
+                  (r) => `
+            <div class="trip">
+              <div class="row">
+                <div class="main">${escapeHtml(r.entree || "?")} → ${escapeHtml(r.sortie || "?")}</div>
+                <div class="amount">${euro(r.prix_ttc)}</div>
+              </div>
+              <div class="meta">${escapeHtml(r.date_raw || "—")} · ${km(r.km)} · ${escapeHtml(r.motif || "")}</div>
+            </div>`
+                )
+                .join("")
+            : `<p class="muted center">Aucun trajet</p>`
+        }
+      </div>
+
+      <div class="card no-print">
+        <strong>Ajouter d’autres PDF</strong>
+        <div class="drop" id="dropMore" style="margin-top:0.8rem;padding:1.4rem">
+          <strong style="font-size:1rem">Déposer ici</strong>
+          <span>ou toucher pour choisir</span>
+          <input id="moreFiles" type="file" accept="application/pdf,.pdf" multiple />
+        </div>
+        <p class="status" id="status"></p>
+      </div>
+    `;
+
+    const copyBtn = document.getElementById("copyBtn");
+    copyBtn.onclick = async () => {
+      await navigator.clipboard.writeText(link);
+      copyBtn.textContent = "Lien copié ✓";
+    };
+
+    const drop = document.getElementById("dropMore");
+    const input = document.getElementById("moreFiles");
+    const status = document.getElementById("status");
+    const run = async (fileList) => {
+      status.className = "status";
+      status.textContent = "Ajout…";
+      try {
+        const { ok } = await importFiles(fileList, { dossierId: id });
+        status.className = "status ok";
+        status.textContent = `${ok} ajouté(s)`;
+        route();
+      } catch (err) {
+        status.className = "status err";
+        status.textContent = err.message || String(err);
+      }
+    };
+    drop.onclick = () => input.click();
+    input.onchange = () => input.files?.length && run(input.files);
+    drop.ondragover = (e) => {
+      e.preventDefault();
+      drop.classList.add("drag");
+    };
+    drop.ondragleave = () => drop.classList.remove("drag");
+    drop.ondrop = (e) => {
+      e.preventDefault();
+      drop.classList.remove("drag");
+      if (e.dataTransfer.files?.length) run(e.dataTransfer.files);
+    };
+  } catch (err) {
+    app.innerHTML = `<div class="card"><div class="status err">${escapeHtml(err.message || String(err))}</div><a href="#/">Retour</a></div>`;
+  }
+}
+
+async function renderPublic(shareToken) {
+  app.innerHTML = `<div class="center muted" style="padding:2rem">Chargement…</div>`;
+  try {
+    const dossiers = await api(
+      `dossiers?share_token=eq.${encodeURIComponent(shareToken)}&select=*`
+    );
+    const dossier = dossiers?.[0];
+    if (!dossier) {
+      app.innerHTML = `<div class="card center">Lien invalide.</div>`;
+      return;
+    }
+    const stats = await getStats(dossier.id);
+    app.innerHTML = `
+      <div class="hero" style="margin-top:0.5rem">
+        <div class="mark">JU</div>
+        <h1>Justificatif de péage</h1>
+        <p>Sans connexion au compte Ulys</p>
+      </div>
+
+      <div class="card">
+        <h2 style="margin:0 0 0.35rem;font-size:1.15rem">${escapeHtml(dossier.title)}</h2>
+        <p class="muted small" style="margin-top:0">${escapeHtml(dossier.description || "")}</p>
+        <div class="stats">
+          <div class="stat"><span>Trajets</span><strong>${stats.count}</strong></div>
+          <div class="stat"><span>Km</span><strong>${km(stats.total_km)}</strong></div>
+          <div class="stat"><span>HT</span><strong>${euro(stats.total_ht)}</strong></div>
+          <div class="stat"><span>TTC</span><strong>${euro(stats.total_ttc)}</strong></div>
+        </div>
+        ${
+          stats.receipts
+            .map(
+              (r) => `
+          <div class="trip">
+            <div class="row">
+              <div class="main">${escapeHtml(r.entree || "?")} → ${escapeHtml(r.sortie || "?")}</div>
+              <div class="amount">${euro(r.prix_ttc)}</div>
+            </div>
+            <div class="meta">${escapeHtml(r.date_raw || "—")} · ${km(r.km)} · ${escapeHtml(r.motif || "")}</div>
+            <div class="meta no-print" style="margin-top:0.45rem">
+              <a class="btn btn-secondary" href="${publicPdfUrl(r.stored_filename)}" target="_blank" rel="noopener">Voir le reçu PDF</a>
+            </div>
+          </div>`
+            )
+            .join("") || `<p class="muted">Aucun trajet</p>`
+        }
+      </div>
+
+      <div class="actions no-print" style="justify-content:center;margin-top:0.5rem">
+        <button class="btn btn-ghost" type="button" onclick="window.print()">Imprimer</button>
+      </div>
+      <p class="footer-note">Montants issus des reçus Ulys. La facture mensuelle reste la référence comptable.</p>
+    `;
+  } catch (err) {
+    app.innerHTML = `<div class="card"><div class="status err">${escapeHtml(err.message || String(err))}</div></div>`;
+  }
 }
 
 window.addEventListener("hashchange", route);
