@@ -1,0 +1,15 @@
+services:
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-ulys2026}
+      SECRET_KEY: ${SECRET_KEY:-changez-cette-cle-secrete}
+      APP_NAME: Justificatifs Ulys
+      BASE_URL: ${BASE_URL:-http://localhost:8000}
+    volumes:
+      - ulys_data:/app/data
+
+volumes:
+  ulys_data:

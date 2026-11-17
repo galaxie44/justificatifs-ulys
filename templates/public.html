@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Justificatif — {{ dossier.title }}</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <div class="brand">
+        <div class="brand-mark">JU</div>
+        <div>
+          <h1>Justificatif de frais de péage</h1>
+          <p>Document partagé · aucune connexion Ulys requise</p>
+        </div>
+      </div>
+      <div class="actions no-print">
+        <button class="btn btn-ghost" type="button" onclick="window.print()">Imprimer</button>
+        <a class="btn btn-primary" href="/j/{{ token }}/export.pdf">Télécharger le récap PDF</a>
+      </div>
+    </div>
+
+    <section class="card">
+      <h2 style="margin:0 0 0.35rem">{{ dossier.title }}</h2>
+      {% if dossier.description %}
+      <p class="muted" style="white-space:pre-wrap; margin-top:0">{{ dossier.description }}</p>
+      {% endif %}
+
+      <div class="stats">
+        <div class="stat"><span>Trajets</span><strong>{{ stats.count }}</strong></div>
+        <div class="stat"><span>Kilomètres</span><strong>{{ stats.total_km | km }}</strong></div>
+        <div class="stat"><span>Total HT</span><strong>{{ stats.total_ht | euro }}</strong></div>
+        <div class="stat"><span>Total TTC</span><strong>{{ stats.total_ttc | euro }}</strong></div>
+      </div>
+
+      {% if receipts %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Entrée</th>
+              <th>Sortie</th>
+              <th>Km</th>
+              <th>HT</th>
+              <th>TVA</th>
+              <th>TTC</th>
+              <th>Motif</th>
+              <th class="no-print">Pièce</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in receipts %}
+            <tr>
+              <td>{{ r.date_raw or "—" }}</td>
+              <td>{{ r.entree or "—" }}</td>
+              <td>{{ r.sortie or "—" }}</td>
+              <td>{{ r.km | km }}</td>
+              <td>{{ r.prix_ht | euro }}</td>
+              <td>{{ r.tva | euro }}</td>
+              <td><strong>{{ r.prix_ttc | euro }}</strong></td>
+              <td>{{ r.motif or "—" }}</td>
+              <td class="no-print">
+                <a class="btn btn-secondary" href="/j/{{ token }}/pdf/{{ r.id }}" target="_blank" rel="noopener">Reçu PDF</a>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">Aucun trajet dans ce dossier pour le moment.</div>
+      {% endif %}
+    </section>
+
+    <p class="muted small" style="margin-top:1rem">
+      Montants issus des reçus informatifs Ulys. La facture mensuelle Ulys reste la référence comptable.
+      Ce lien ne donne aucun accès au compte Ulys du titulaire.
+    </p>
+  </div>
+</body>
+</html>

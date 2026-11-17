@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ dossier.title }} — {{ app_name }}</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <div class="brand">
+        <div class="brand-mark">JU</div>
+        <div>
+          <h1>{{ dossier.title }}</h1>
+          <p><a href="/">← Tous les dossiers</a></p>
+        </div>
+      </div>
+      <div class="actions no-print">
+        <a class="btn btn-accent" href="{{ share_url }}" target="_blank" rel="noopener">Voir le justificatif public</a>
+      </div>
+    </div>
+
+    <div class="notice">
+      Partagez uniquement le lien ci-dessous. Les destinataires voient le récapitulatif et les PDF,
+      <strong>sans accès à votre compte Ulys</strong>.
+    </div>
+
+    <section class="card" style="margin-bottom:1rem">
+      <h2 style="margin-top:0">Lien public de justification</h2>
+      <div class="share-box">
+        <input id="shareUrl" type="text" readonly value="{{ share_url }}" />
+        <button class="btn btn-secondary" type="button" onclick="navigator.clipboard.writeText(document.getElementById('shareUrl').value); this.textContent='Copié';">Copier</button>
+        <a class="btn btn-primary" href="/j/{{ dossier.share_token }}/export.pdf">Exporter PDF récap</a>
+      </div>
+    </section>
+
+    <div class="stats">
+      <div class="stat"><span>Trajets</span><strong>{{ stats.count }}</strong></div>
+      <div class="stat"><span>Kilomètres</span><strong>{{ stats.total_km | km }}</strong></div>
+      <div class="stat"><span>Total HT</span><strong>{{ stats.total_ht | euro }}</strong></div>
+      <div class="stat"><span>Total TTC</span><strong>{{ stats.total_ttc | euro }}</strong></div>
+    </div>
+
+    <div class="grid-2">
+      <section class="card">
+        <h2 style="margin-top:0">Ajouter des reçus Ulys (PDF)</h2>
+        <p class="muted small">Les champs date, gares de péage, km et montants sont extraits automatiquement.</p>
+        <form method="post" action="/dossiers/{{ dossier.id }}/upload" enctype="multipart/form-data">
+          <div class="field">
+            <label for="files">Fichiers PDF</label>
+            <input id="files" name="files" type="file" accept="application/pdf,.pdf" multiple required />
+          </div>
+          <div class="field">
+            <label for="motif">Motif par défaut (optionnel)</label>
+            <input id="motif" name="motif" type="text" placeholder="Déplacement professionnel" />
+          </div>
+          <button class="btn btn-primary" type="submit">Importer et analyser</button>
+        </form>
+      </section>
+
+      <section class="card">
+        <h2 style="margin-top:0">Infos du dossier</h2>
+        <form method="post" action="/dossiers/{{ dossier.id }}/update">
+          <div class="field">
+            <label for="title">Titre</label>
+            <input id="title" name="title" type="text" value="{{ dossier.title }}" required />
+          </div>
+          <div class="field">
+            <label for="description">Description publique</label>
+            <textarea id="description" name="description">{{ dossier.description }}</textarea>
+          </div>
+          <div class="actions">
+            <button class="btn btn-secondary" type="submit">Enregistrer</button>
+            <button class="btn btn-danger" type="submit" formaction="/dossiers/{{ dossier.id }}/delete" formmethod="post" onclick="return confirm('Supprimer ce dossier et tous ses PDF ?');">Supprimer</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <section class="card" style="margin-top:1rem">
+      <h2 style="margin-top:0">Trajets importés</h2>
+      {% if receipts %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Trajet</th>
+              <th>Km</th>
+              <th>TTC</th>
+              <th>Motif</th>
+              <th>Reçu</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in receipts %}
+            <tr>
+              <td>{{ r.date_raw or "—" }}</td>
+              <td class="route">{{ r.entree or "?" }} <span>→</span> {{ r.sortie or "?" }}</td>
+              <td>{{ r.km | km }}</td>
+              <td><strong>{{ r.prix_ttc | euro }}</strong></td>
+              <td>
+                <form class="motif-inline" method="post" action="/receipts/{{ r.id }}/motif">
+                  <input name="motif" type="text" value="{{ r.motif }}" placeholder="Motif…" />
+                  <button class="btn btn-secondary" type="submit">OK</button>
+                </form>
+              </td>
+              <td><a href="/pdf/{{ r.id }}" target="_blank" rel="noopener">PDF</a></td>
+              <td>
+                <form method="post" action="/receipts/{{ r.id }}/delete" onsubmit="return confirm('Supprimer ce reçu ?');">
+                  <button class="btn btn-danger" type="submit">×</button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">Importez vos PDF Ulys pour constituer le justificatif.</div>
+      {% endif %}
+    </section>
+  </div>
+</body>
+</html>
