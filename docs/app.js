@@ -498,8 +498,7 @@ async function renderMonth(year, month, token = navToken) {
       <div class="stats">
         <div class="stat"><span>Trajets</span><strong>${stats.count}</strong></div>
         <div class="stat"><span>Km</span><strong>${km(stats.total_km)}</strong></div>
-        <div class="stat"><span>HT</span><strong>${euro(stats.total_ht)}</strong></div>
-        <div class="stat"><span>TTC</span><strong>${euro(stats.total_ttc)}</strong></div>
+        <div class="stat"><span>Total</span><strong>${euro(stats.total_ttc)}</strong></div>
       </div>
 
       <div class="card">
