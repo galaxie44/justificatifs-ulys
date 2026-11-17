@@ -210,6 +210,57 @@ th {
   margin: 0;
   font-size: 1.25rem;
 }
+.mark-mini {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: linear-gradient(145deg, var(--brand), var(--brand-2));
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+
+.year-grid, .month-grid {
+  display: grid;
+  gap: 0.65rem;
+}
+.year-grid { grid-template-columns: 1fr 1fr; }
+.month-grid { grid-template-columns: 1fr 1fr; }
+@media (min-width: 560px) {
+  .month-grid { grid-template-columns: repeat(3, 1fr); }
+}
+.year-card, .month-card {
+  display: block;
+  background: #f7faf8;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 1rem 0.9rem;
+  color: inherit;
+  text-decoration: none;
+  transition: border-color .15s, transform .15s, background .15s;
+}
+.year-card:hover, .month-card:hover {
+  border-color: var(--brand-2);
+  background: #eef7f3;
+  text-decoration: none;
+  transform: translateY(-1px);
+}
+.year-card.current, .month-card.current {
+  border-color: var(--brand-2);
+  background: #e7f3ef;
+}
+.year-card strong, .month-card strong {
+  display: block;
+  font-size: 1.1rem;
+}
+.year-card span, .month-card span {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
 .muted { color: var(--muted); }
 .small { font-size: 0.88rem; }
 .center { text-align: center; }

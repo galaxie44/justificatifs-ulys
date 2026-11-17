@@ -2,7 +2,27 @@ const SUPABASE_URL = "https://lljycdhijeuizzizuceh.supabase.co";
 const SUPABASE_ANON_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxsanljZGhpamV1aXp6aXp1Y2VoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ5MTgxNzQsImV4cCI6MjExMDQ5NDE3NH0.o-0oRw3lRvU3l_b4jt_LCRNTM7aqQa9ju0jmyOUSpUw";
 
+const MOIS = [
+  "",
+  "Janvier",
+  "Février",
+  "Mars",
+  "Avril",
+  "Mai",
+  "Juin",
+  "Juillet",
+  "Août",
+  "Septembre",
+  "Octobre",
+  "Novembre",
+  "Décembre",
+];
+
+const YEARS = [2026, 2027];
 const app = document.getElementById("app");
+const now = new Date();
+const CURRENT_YEAR = now.getFullYear();
+const CURRENT_MONTH = now.getMonth() + 1;
 
 const euro = (v) =>
   v == null || Number.isNaN(Number(v))
@@ -36,15 +56,6 @@ async function api(path, options = {}) {
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) return null;
   return res.json();
-}
-
-function newToken() {
-  const arr = new Uint8Array(18);
-  crypto.getRandomValues(arr);
-  return btoa(String.fromCharCode(...arr))
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
 }
 
 function parseUlysText(text) {
@@ -116,6 +127,13 @@ async function uploadStorage(path, file) {
   if (!res.ok) throw new Error(await res.text());
 }
 
+async function getDossier(year, month) {
+  const rows = await api(
+    `dossiers?year=eq.${year}&month=eq.${month}&select=*&limit=1`
+  );
+  return rows?.[0] || null;
+}
+
 async function getStats(dossierId) {
   const rows = (await api(`receipts?dossier_id=eq.${dossierId}&select=*`)) || [];
   rows.sort((a, b) =>
@@ -129,6 +147,22 @@ async function getStats(dossierId) {
     total_km: rows.reduce((s, r) => s + (r.km || 0), 0),
     receipts: rows,
   };
+}
+
+async function monthTotals(year) {
+  const dossiers =
+    (await api(`dossiers?year=eq.${year}&select=id,month&order=month.asc`)) || [];
+  const out = {};
+  for (const d of dossiers) {
+    const receipts =
+      (await api(`receipts?dossier_id=eq.${d.id}&select=prix_ttc`)) || [];
+    out[d.month] = {
+      id: d.id,
+      count: receipts.length,
+      total: receipts.reduce((s, r) => s + (r.prix_ttc || 0), 0),
+    };
+  }
+  return out;
 }
 
 function shareUrl(token) {
@@ -146,32 +180,9 @@ function escapeAttr(s) {
   return escapeHtml(s).replaceAll("'", "&#39;");
 }
 
-function autoTitle() {
-  const d = new Date();
-  return `Note de frais — ${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
-}
-
-async function importFiles(files, { dossierId = null, motif = "Déplacement professionnel", title = null } = {}) {
-  const pdfs = [...files].filter((f) => f && f.name && f.name.toLowerCase().endsWith(".pdf"));
+async function importFiles(files, dossier, motif = "Déplacement professionnel") {
+  const pdfs = [...files].filter((f) => f?.name?.toLowerCase().endsWith(".pdf"));
   if (!pdfs.length) throw new Error("Choisissez au moins un PDF Ulys.");
-
-  let dossier = null;
-  if (dossierId) {
-    const rows = await api(`dossiers?id=eq.${dossierId}&select=*`);
-    dossier = rows?.[0];
-    if (!dossier) throw new Error("Dossier introuvable.");
-  } else {
-    const created = await api("dossiers", {
-      method: "POST",
-      body: JSON.stringify({
-        title: title || autoTitle(),
-        description: "Justificatif de frais de péage Ulys.",
-        share_token: newToken(),
-      }),
-    });
-    dossier = created[0];
-  }
-
   let ok = 0;
   for (const file of pdfs) {
     const text = await extractPdfText(file);
@@ -190,105 +201,119 @@ async function importFiles(files, { dossierId = null, motif = "Déplacement prof
     });
     ok += 1;
   }
-
   await api(`dossiers?id=eq.${dossier.id}`, {
     method: "PATCH",
     headers: { Prefer: "return=minimal" },
     body: JSON.stringify({ updated_at: new Date().toISOString() }),
   });
-
-  return { dossier, ok };
+  return ok;
 }
 
 function route() {
   const hash = location.hash.replace(/^#/, "") || "/";
   const pub = hash.match(/^\/j\/([^/]+)/);
   if (pub) return renderPublic(decodeURIComponent(pub[1]));
-  const dos = hash.match(/^\/d\/(\d+)/);
-  if (dos) return renderResult(Number(dos[1]));
+  const month = hash.match(/^\/(\d{4})\/(\d{1,2})$/);
+  if (month) return renderMonth(Number(month[1]), Number(month[2]));
+  const year = hash.match(/^\/(\d{4})$/);
+  if (year) return renderYear(Number(year[1]));
   return renderHome();
 }
 
+function brand(title, subtitle, backHref = null) {
+  return `
+    <div class="top-simple">
+      <div>
+        ${backHref ? `<a class="muted small" href="${backHref}">← Retour</a>` : ""}
+        <h1 style="margin-top:${backHref ? "0.25rem" : "0"}">${title}</h1>
+        ${subtitle ? `<p class="muted small" style="margin:0.25rem 0 0">${subtitle}</p>` : ""}
+      </div>
+      <div class="mark-mini">JU</div>
+    </div>
+  `;
+}
+
 function renderHome() {
+  const defaultYear = YEARS.includes(CURRENT_YEAR) ? CURRENT_YEAR : 2026;
   app.innerHTML = `
     <div class="hero">
       <div class="mark">JU</div>
-      <h1>Justificatif Ulys</h1>
-      <p>1. Déposez vos PDF&nbsp;&nbsp;2. Copiez le lien</p>
+      <h1>Justificatifs Ulys</h1>
+      <p>Edouard Clemenceau · un dossier par mois</p>
     </div>
-
-    <div class="drop" id="drop">
-      <strong>Déposez vos reçus PDF ici</strong>
-      <span>ou touchez pour choisir les fichiers</span>
-      <input id="files" type="file" accept="application/pdf,.pdf" multiple />
+    <div class="card">
+      <p class="muted small" style="margin-top:0">Choisissez l’année</p>
+      <div class="year-grid">
+        ${YEARS.map(
+          (y) => `
+          <a class="year-card ${y === defaultYear ? "current" : ""}" href="#/${y}">
+            <strong>${y}</strong>
+            <span>${y === CURRENT_YEAR ? "Année en cours" : y === CURRENT_YEAR + 1 ? "Année prochaine" : ""}</span>
+          </a>`
+        ).join("")}
+      </div>
     </div>
-
-    <div class="field">
-      <label for="motif">Motif (optionnel)</label>
-      <input id="motif" value="Déplacement professionnel" />
-    </div>
-
-    <p class="status" id="status"></p>
-    <p class="footer-note">Vos destinataires voient le récapitulatif et les PDF.<br/>Ils n’ont pas besoin de votre compte Ulys.</p>
+    <p class="footer-note">Astuce : ouvrez le mois, déposez vos PDF, copiez le lien à envoyer.</p>
   `;
-
-  const drop = document.getElementById("drop");
-  const input = document.getElementById("files");
-  const status = document.getElementById("status");
-
-  const run = async (fileList) => {
-    status.className = "status";
-    status.textContent = "Analyse en cours…";
-    drop.style.pointerEvents = "none";
-    try {
-      const motif = document.getElementById("motif").value.trim() || "Déplacement professionnel";
-      const { dossier, ok } = await importFiles(fileList, { motif });
-      status.className = "status ok";
-      status.textContent = `${ok} reçu(s) prêt(s)`;
-      location.hash = `#/d/${dossier.id}`;
-    } catch (err) {
-      status.className = "status err";
-      status.textContent = err.message || String(err);
-      drop.style.pointerEvents = "";
-    }
-  };
-
-  drop.onclick = () => input.click();
-  input.onchange = () => {
-    if (input.files?.length) run(input.files);
-  };
-  drop.ondragover = (e) => {
-    e.preventDefault();
-    drop.classList.add("drag");
-  };
-  drop.ondragleave = () => drop.classList.remove("drag");
-  drop.ondrop = (e) => {
-    e.preventDefault();
-    drop.classList.remove("drag");
-    if (e.dataTransfer.files?.length) run(e.dataTransfer.files);
-  };
 }
 
-async function renderResult(id) {
-  app.innerHTML = `<div class="center muted" style="padding:2rem">Chargement…</div>`;
+async function renderYear(year) {
+  if (!YEARS.includes(year)) {
+    location.hash = "#/";
+    return;
+  }
+  app.innerHTML = `${brand(String(year), "Chargement des mois…", "#/")}<div class="center muted">Chargement…</div>`;
   try {
-    const rows = await api(`dossiers?id=eq.${id}&select=*`);
-    const dossier = rows?.[0];
-    if (!dossier) {
-      app.innerHTML = `<div class="card center"><p>Introuvable.</p><a class="btn btn-primary" href="#/">Recommencer</a></div>`;
-      return;
-    }
-    const stats = await getStats(id);
+    const totals = await monthTotals(year);
+    app.innerHTML = `
+      ${brand(String(year), "Choisissez le mois à justifier", "#/")}
+      <div class="month-grid">
+        ${Array.from({ length: 12 }, (_, i) => i + 1)
+          .map((m) => {
+            const info = totals[m] || { count: 0, total: 0 };
+            const isCurrent = year === CURRENT_YEAR && m === CURRENT_MONTH;
+            return `
+              <a class="month-card ${isCurrent ? "current" : ""}" href="#/${year}/${m}">
+                <strong>${MOIS[m]}</strong>
+                <span>${info.count ? `${info.count} trajet${info.count > 1 ? "s" : ""} · ${euro(info.total)}` : "Vide"}</span>
+              </a>`;
+          })
+          .join("")}
+      </div>
+    `;
+  } catch (err) {
+    app.innerHTML = `${brand(String(year), "Erreur", "#/")}<div class="card status err">${escapeHtml(err.message)}</div>`;
+  }
+}
+
+async function renderMonth(year, month) {
+  if (!YEARS.includes(year) || month < 1 || month > 12) {
+    location.hash = "#/";
+    return;
+  }
+  app.innerHTML = `${brand(`${MOIS[month]} ${year}`, "Chargement…", `#/${year}`)}<div class="center muted">Chargement…</div>`;
+  try {
+    const dossier = await getDossier(year, month);
+    if (!dossier) throw new Error("Dossier du mois introuvable.");
+    const stats = await getStats(dossier.id);
     const link = shareUrl(dossier.share_token);
 
     app.innerHTML = `
-      <div class="top-simple">
-        <h1>C’est prêt</h1>
-        <a class="btn btn-ghost no-print" href="#/">Nouveau</a>
+      ${brand(`${MOIS[month]} ${year}`, "Déposez vos PDF puis envoyez le lien", `#/${year}`)}
+
+      <div class="drop" id="drop">
+        <strong>Déposez vos reçus PDF ici</strong>
+        <span>ou touchez pour choisir les fichiers</span>
+        <input id="files" type="file" accept="application/pdf,.pdf" multiple />
       </div>
+      <div class="field">
+        <label for="motif">Motif (optionnel)</label>
+        <input id="motif" value="Déplacement professionnel" />
+      </div>
+      <p class="status" id="status"></p>
 
       <div class="card">
-        <p class="muted small" style="margin-top:0">Envoyez ce lien — sans accès à votre compte Ulys</p>
+        <p class="muted small" style="margin-top:0">Lien à envoyer (sans accès au compte Ulys)</p>
         <div class="share">
           <input id="shareUrl" readonly value="${escapeAttr(link)}" />
           <button class="btn btn-primary btn-lg" type="button" id="copyBtn">Copier le lien</button>
@@ -318,18 +343,8 @@ async function renderResult(id) {
             </div>`
                 )
                 .join("")
-            : `<p class="muted center">Aucun trajet</p>`
+            : `<p class="muted center" style="margin:0">Aucun reçu pour ce mois.</p>`
         }
-      </div>
-
-      <div class="card no-print">
-        <strong>Ajouter d’autres PDF</strong>
-        <div class="drop" id="dropMore" style="margin-top:0.8rem;padding:1.4rem">
-          <strong style="font-size:1rem">Déposer ici</strong>
-          <span>ou toucher pour choisir</span>
-          <input id="moreFiles" type="file" accept="application/pdf,.pdf" multiple />
-        </div>
-        <p class="status" id="status"></p>
       </div>
     `;
 
@@ -339,20 +354,24 @@ async function renderResult(id) {
       copyBtn.textContent = "Lien copié ✓";
     };
 
-    const drop = document.getElementById("dropMore");
-    const input = document.getElementById("moreFiles");
+    const drop = document.getElementById("drop");
+    const input = document.getElementById("files");
     const status = document.getElementById("status");
     const run = async (fileList) => {
       status.className = "status";
-      status.textContent = "Ajout…";
+      status.textContent = "Analyse en cours…";
+      drop.style.pointerEvents = "none";
       try {
-        const { ok } = await importFiles(fileList, { dossierId: id });
+        const motif =
+          document.getElementById("motif").value.trim() || "Déplacement professionnel";
+        const ok = await importFiles(fileList, dossier, motif);
         status.className = "status ok";
-        status.textContent = `${ok} ajouté(s)`;
+        status.textContent = `${ok} reçu(s) ajouté(s)`;
         route();
       } catch (err) {
         status.className = "status err";
         status.textContent = err.message || String(err);
+        drop.style.pointerEvents = "";
       }
     };
     drop.onclick = () => input.click();
@@ -368,7 +387,7 @@ async function renderResult(id) {
       if (e.dataTransfer.files?.length) run(e.dataTransfer.files);
     };
   } catch (err) {
-    app.innerHTML = `<div class="card"><div class="status err">${escapeHtml(err.message || String(err))}</div><a href="#/">Retour</a></div>`;
+    app.innerHTML = `${brand(`${MOIS[month]} ${year}`, "Erreur", `#/${year}`)}<div class="card status err">${escapeHtml(err.message)}</div>`;
   }
 }
 
@@ -384,16 +403,17 @@ async function renderPublic(shareToken) {
       return;
     }
     const stats = await getStats(dossier.id);
+    const label =
+      dossier.year && dossier.month
+        ? `${MOIS[dossier.month]} ${dossier.year}`
+        : dossier.title;
     app.innerHTML = `
       <div class="hero" style="margin-top:0.5rem">
         <div class="mark">JU</div>
-        <h1>Justificatif de péage</h1>
-        <p>Sans connexion au compte Ulys</p>
+        <h1>${escapeHtml(label)}</h1>
+        <p>Justificatif Ulys · Edouard Clemenceau</p>
       </div>
-
       <div class="card">
-        <h2 style="margin:0 0 0.35rem;font-size:1.15rem">${escapeHtml(dossier.title)}</h2>
-        <p class="muted small" style="margin-top:0">${escapeHtml(dossier.description || "")}</p>
         <div class="stats">
           <div class="stat"><span>Trajets</span><strong>${stats.count}</strong></div>
           <div class="stat"><span>Km</span><strong>${km(stats.total_km)}</strong></div>
@@ -418,14 +438,13 @@ async function renderPublic(shareToken) {
             .join("") || `<p class="muted">Aucun trajet</p>`
         }
       </div>
-
-      <div class="actions no-print" style="justify-content:center;margin-top:0.5rem">
+      <div class="actions no-print" style="justify-content:center">
         <button class="btn btn-ghost" type="button" onclick="window.print()">Imprimer</button>
       </div>
-      <p class="footer-note">Montants issus des reçus Ulys. La facture mensuelle reste la référence comptable.</p>
+      <p class="footer-note">Sans accès au compte Ulys. Montants issus des reçus informatifs.</p>
     `;
   } catch (err) {
-    app.innerHTML = `<div class="card"><div class="status err">${escapeHtml(err.message || String(err))}</div></div>`;
+    app.innerHTML = `<div class="card status err">${escapeHtml(err.message || String(err))}</div>`;
   }
 }
 
