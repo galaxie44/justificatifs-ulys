@@ -165,8 +165,8 @@ async function monthTotals(year) {
   return out;
 }
 
-function shareUrl(token) {
-  return `${location.origin}${location.pathname.replace(/\/$/, "")}/#/j/${token}`;
+function appUrl() {
+  return `${location.origin}${location.pathname.replace(/\/$/, "")}/`;
 }
 
 function escapeHtml(s) {
@@ -178,6 +178,94 @@ function escapeHtml(s) {
 }
 function escapeAttr(s) {
   return escapeHtml(s).replaceAll("'", "&#39;");
+}
+
+function safeName(s) {
+  return String(s || "fichier")
+    .replace(/[\\/:*?"<>|]+/g, "-")
+    .replace(/\s+/g, "_")
+    .slice(0, 80);
+}
+
+function csvEscape(v) {
+  const s = String(v ?? "");
+  if (/[;"\n]/.test(s)) return `"${s.replaceAll('"', '""')}"`;
+  return s;
+}
+
+function buildRecapCsv(label, stats) {
+  const lines = [
+    ["Dossier", label],
+    ["Trajets", stats.count],
+    ["Km", stats.total_km],
+    ["Total HT", stats.total_ht],
+    ["Total TVA", stats.total_tva],
+    ["Total TTC", stats.total_ttc],
+    [],
+    ["Date", "Entrée", "Sortie", "Km", "HT", "TVA", "TTC", "Motif", "Fichier"],
+    ...stats.receipts.map((r) => [
+      r.date_raw || "",
+      r.entree || "",
+      r.sortie || "",
+      r.km ?? "",
+      r.prix_ht ?? "",
+      r.tva ?? "",
+      r.prix_ttc ?? "",
+      r.motif || "",
+      r.original_filename || "",
+    ]),
+  ];
+  return "\uFEFF" + lines.map((row) => row.map(csvEscape).join(";")).join("\n");
+}
+
+async function downloadMonthZip(label, stats, button) {
+  if (!stats.receipts.length) {
+    alert("Aucun reçu à télécharger pour ce mois.");
+    return;
+  }
+  const old = button.textContent;
+  button.disabled = true;
+  button.textContent = "Préparation du ZIP…";
+  try {
+    const JSZip = (await import("https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm")).default;
+    const zip = new JSZip();
+    const folder = zip.folder(safeName(label));
+    folder.file("recapitulatif.csv", buildRecapCsv(label, stats));
+    folder.file(
+      "README.txt",
+      `Justificatifs Ulys — ${label}\nEdouard Clemenceau\n\nContenu :\n- recapitulatif.csv (tableau des trajets)\n- reçus PDF individuels\n`
+    );
+
+    let i = 1;
+    for (const r of stats.receipts) {
+      button.textContent = `Téléchargement ${i}/${stats.receipts.length}…`;
+      const res = await fetch(publicPdfUrl(r.stored_filename));
+      if (!res.ok) throw new Error(`Impossible de récupérer ${r.original_filename}`);
+      const blob = await res.blob();
+      const datePart = (r.date_raw || `trajet-${i}`).replace(/[^\d]/g, "-").replace(/-+/g, "-");
+      const name = `${String(i).padStart(2, "0")}_${safeName(datePart)}_${safeName(r.entree)}_vers_${safeName(r.sortie)}.pdf`;
+      folder.file(name, blob);
+      i += 1;
+    }
+
+    button.textContent = "Création du ZIP…";
+    const content = await zip.generateAsync({ type: "blob" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(content);
+    a.download = `${safeName(label)}_justificatifs-ulys.zip`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    button.textContent = "ZIP téléchargé ✓";
+  } catch (err) {
+    console.error(err);
+    alert(err.message || String(err));
+    button.textContent = old;
+  } finally {
+    button.disabled = false;
+    setTimeout(() => {
+      if (button.textContent.includes("✓")) button.textContent = old;
+    }, 2000);
+  }
 }
 
 async function importFiles(files, dossier, motif = "Déplacement professionnel") {
@@ -211,8 +299,6 @@ async function importFiles(files, dossier, motif = "Déplacement professionnel")
 
 function route() {
   const hash = location.hash.replace(/^#/, "") || "/";
-  const pub = hash.match(/^\/j\/([^/]+)/);
-  if (pub) return renderPublic(decodeURIComponent(pub[1]));
   const month = hash.match(/^\/(\d{4})\/(\d{1,2})$/);
   if (month) return renderMonth(Number(month[1]), Number(month[2]));
   const year = hash.match(/^\/(\d{4})$/);
@@ -233,16 +319,36 @@ function brand(title, subtitle, backHref = null) {
   `;
 }
 
+function bindCopy(btnId, inputId) {
+  const btn = document.getElementById(btnId);
+  const input = document.getElementById(inputId);
+  if (!btn || !input) return;
+  btn.onclick = async () => {
+    await navigator.clipboard.writeText(input.value);
+    btn.textContent = "Copié ✓";
+  };
+}
+
 function renderHome() {
   const defaultYear = YEARS.includes(CURRENT_YEAR) ? CURRENT_YEAR : 2026;
+  const link = appUrl();
   app.innerHTML = `
     <div class="hero">
       <div class="mark">JU</div>
       <h1>Justificatifs Ulys</h1>
-      <p>Edouard Clemenceau · un dossier par mois</p>
+      <p>Edouard Clemenceau · dossiers par année et par mois</p>
     </div>
+
     <div class="card">
-      <p class="muted small" style="margin-top:0">Choisissez l’année</p>
+      <p class="muted small" style="margin-top:0">Lien à mettre dans votre Excel (tout le monde peut parcourir et télécharger)</p>
+      <div class="share">
+        <input id="appLink" readonly value="${escapeAttr(link)}" />
+        <button class="btn btn-primary" type="button" id="copyApp">Copier le lien de l’app</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <p class="muted small" style="margin-top:0">Ouvrir un dossier</p>
       <div class="year-grid">
         ${YEARS.map(
           (y) => `
@@ -253,8 +359,9 @@ function renderHome() {
         ).join("")}
       </div>
     </div>
-    <p class="footer-note">Astuce : ouvrez le mois, déposez vos PDF, copiez le lien à envoyer.</p>
+    <p class="footer-note">Parcourez année → mois · consultez les trajets · téléchargez le dossier ZIP complet.</p>
   `;
+  bindCopy("copyApp", "appLink");
 }
 
 async function renderYear(year) {
@@ -266,7 +373,7 @@ async function renderYear(year) {
   try {
     const totals = await monthTotals(year);
     app.innerHTML = `
-      ${brand(String(year), "Choisissez le mois à justifier", "#/")}
+      ${brand(String(year), "Choisissez un mois pour consulter ou télécharger", "#/")}
       <div class="month-grid">
         ${Array.from({ length: 12 }, (_, i) => i + 1)
           .map((m) => {
@@ -291,35 +398,15 @@ async function renderMonth(year, month) {
     location.hash = "#/";
     return;
   }
-  app.innerHTML = `${brand(`${MOIS[month]} ${year}`, "Chargement…", `#/${year}`)}<div class="center muted">Chargement…</div>`;
+  const label = `${MOIS[month]} ${year}`;
+  app.innerHTML = `${brand(label, "Chargement…", `#/${year}`)}<div class="center muted">Chargement…</div>`;
   try {
     const dossier = await getDossier(year, month);
     if (!dossier) throw new Error("Dossier du mois introuvable.");
     const stats = await getStats(dossier.id);
-    const link = shareUrl(dossier.share_token);
 
     app.innerHTML = `
-      ${brand(`${MOIS[month]} ${year}`, "Déposez vos PDF puis envoyez le lien", `#/${year}`)}
-
-      <div class="drop" id="drop">
-        <strong>Déposez vos reçus PDF ici</strong>
-        <span>ou touchez pour choisir les fichiers</span>
-        <input id="files" type="file" accept="application/pdf,.pdf" multiple />
-      </div>
-      <div class="field">
-        <label for="motif">Motif (optionnel)</label>
-        <input id="motif" value="Déplacement professionnel" />
-      </div>
-      <p class="status" id="status"></p>
-
-      <div class="card">
-        <p class="muted small" style="margin-top:0">Lien à envoyer (sans accès au compte Ulys)</p>
-        <div class="share">
-          <input id="shareUrl" readonly value="${escapeAttr(link)}" />
-          <button class="btn btn-primary btn-lg" type="button" id="copyBtn">Copier le lien</button>
-          <a class="btn btn-secondary" href="#/j/${escapeAttr(dossier.share_token)}">Voir comme eux</a>
-        </div>
-      </div>
+      ${brand(label, "Consulter · télécharger · ajouter des reçus", `#/${year}`)}
 
       <div class="stats">
         <div class="stat"><span>Trajets</span><strong>${stats.count}</strong></div>
@@ -329,6 +416,14 @@ async function renderMonth(year, month) {
       </div>
 
       <div class="card">
+        <button class="btn btn-primary btn-lg" type="button" id="dlZip" ${stats.count ? "" : "disabled"}>
+          Télécharger le dossier complet (ZIP)
+        </button>
+        <p class="muted small" style="margin:0.7rem 0 0">Le ZIP contient tous les PDF du mois + un récapitulatif CSV.</p>
+      </div>
+
+      <div class="card">
+        <h2 style="margin:0 0 0.75rem;font-size:1.05rem">Reçus du mois</h2>
         ${
           stats.receipts.length
             ? stats.receipts
@@ -340,19 +435,33 @@ async function renderMonth(year, month) {
                 <div class="amount">${euro(r.prix_ttc)}</div>
               </div>
               <div class="meta">${escapeHtml(r.date_raw || "—")} · ${km(r.km)} · ${escapeHtml(r.motif || "")}</div>
+              <div class="meta" style="margin-top:0.45rem">
+                <a class="btn btn-secondary" href="${publicPdfUrl(r.stored_filename)}" target="_blank" rel="noopener" download>Télécharger ce PDF</a>
+              </div>
             </div>`
                 )
                 .join("")
             : `<p class="muted center" style="margin:0">Aucun reçu pour ce mois.</p>`
         }
       </div>
+
+      <div class="card no-print">
+        <h2 style="margin:0 0 0.75rem;font-size:1.05rem">Ajouter des reçus (Edouard)</h2>
+        <div class="drop" id="drop">
+          <strong>Déposez vos reçus PDF ici</strong>
+          <span>ou touchez pour choisir les fichiers</span>
+          <input id="files" type="file" accept="application/pdf,.pdf" multiple />
+        </div>
+        <div class="field">
+          <label for="motif">Motif (optionnel)</label>
+          <input id="motif" value="Déplacement professionnel" />
+        </div>
+        <p class="status" id="status"></p>
+      </div>
     `;
 
-    const copyBtn = document.getElementById("copyBtn");
-    copyBtn.onclick = async () => {
-      await navigator.clipboard.writeText(link);
-      copyBtn.textContent = "Lien copié ✓";
-    };
+    const dlZip = document.getElementById("dlZip");
+    dlZip.onclick = () => downloadMonthZip(label, stats, dlZip);
 
     const drop = document.getElementById("drop");
     const input = document.getElementById("files");
@@ -387,64 +496,7 @@ async function renderMonth(year, month) {
       if (e.dataTransfer.files?.length) run(e.dataTransfer.files);
     };
   } catch (err) {
-    app.innerHTML = `${brand(`${MOIS[month]} ${year}`, "Erreur", `#/${year}`)}<div class="card status err">${escapeHtml(err.message)}</div>`;
-  }
-}
-
-async function renderPublic(shareToken) {
-  app.innerHTML = `<div class="center muted" style="padding:2rem">Chargement…</div>`;
-  try {
-    const dossiers = await api(
-      `dossiers?share_token=eq.${encodeURIComponent(shareToken)}&select=*`
-    );
-    const dossier = dossiers?.[0];
-    if (!dossier) {
-      app.innerHTML = `<div class="card center">Lien invalide.</div>`;
-      return;
-    }
-    const stats = await getStats(dossier.id);
-    const label =
-      dossier.year && dossier.month
-        ? `${MOIS[dossier.month]} ${dossier.year}`
-        : dossier.title;
-    app.innerHTML = `
-      <div class="hero" style="margin-top:0.5rem">
-        <div class="mark">JU</div>
-        <h1>${escapeHtml(label)}</h1>
-        <p>Justificatif Ulys · Edouard Clemenceau</p>
-      </div>
-      <div class="card">
-        <div class="stats">
-          <div class="stat"><span>Trajets</span><strong>${stats.count}</strong></div>
-          <div class="stat"><span>Km</span><strong>${km(stats.total_km)}</strong></div>
-          <div class="stat"><span>HT</span><strong>${euro(stats.total_ht)}</strong></div>
-          <div class="stat"><span>TTC</span><strong>${euro(stats.total_ttc)}</strong></div>
-        </div>
-        ${
-          stats.receipts
-            .map(
-              (r) => `
-          <div class="trip">
-            <div class="row">
-              <div class="main">${escapeHtml(r.entree || "?")} → ${escapeHtml(r.sortie || "?")}</div>
-              <div class="amount">${euro(r.prix_ttc)}</div>
-            </div>
-            <div class="meta">${escapeHtml(r.date_raw || "—")} · ${km(r.km)} · ${escapeHtml(r.motif || "")}</div>
-            <div class="meta no-print" style="margin-top:0.45rem">
-              <a class="btn btn-secondary" href="${publicPdfUrl(r.stored_filename)}" target="_blank" rel="noopener">Voir le reçu PDF</a>
-            </div>
-          </div>`
-            )
-            .join("") || `<p class="muted">Aucun trajet</p>`
-        }
-      </div>
-      <div class="actions no-print" style="justify-content:center">
-        <button class="btn btn-ghost" type="button" onclick="window.print()">Imprimer</button>
-      </div>
-      <p class="footer-note">Sans accès au compte Ulys. Montants issus des reçus informatifs.</p>
-    `;
-  } catch (err) {
-    app.innerHTML = `<div class="card status err">${escapeHtml(err.message || String(err))}</div>`;
+    app.innerHTML = `${brand(label, "Erreur", `#/${year}`)}<div class="card status err">${escapeHtml(err.message)}</div>`;
   }
 }
 
