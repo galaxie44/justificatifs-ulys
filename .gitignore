@@ -7,3 +7,4 @@ data/uploads/*
 !data/uploads/.gitkeep
 .DS_Store
 *.log
+data/cookies.txt
