@@ -329,7 +329,7 @@ async function downloadNamedPdf(r, idx) {
   URL.revokeObjectURL(a.href);
 }
 
-async function importFiles(files, dossier, motif = "Déplacement professionnel") {
+async function importFiles(files, dossier, motif = "Déplacement ADLB") {
   const pdfs = [...files].filter((f) => f?.name?.toLowerCase().endsWith(".pdf"));
   if (!pdfs.length) throw new Error("Choisissez au moins un PDF Ulys.");
 
@@ -381,49 +381,32 @@ function route() {
   return renderHome();
 }
 
+const LOGO = "assets/adlb-logo.png";
+
 function brand(title, subtitle, backHref = null) {
   return `
     <div class="top-simple">
       <div>
-        ${backHref ? `<a class="muted small" href="${backHref}">← Retour</a>` : ""}
-        <h1 style="margin-top:${backHref ? "0.25rem" : "0"}">${title}</h1>
+        ${backHref ? `<a class="back" href="${backHref}">← Retour</a>` : ""}
+        <h1 style="margin-top:${backHref ? "0.15rem" : "0"}">${title}</h1>
         ${subtitle ? `<p class="muted small" style="margin:0.25rem 0 0">${subtitle}</p>` : ""}
       </div>
-      <div class="mark-mini">JU</div>
+      <img class="logo-mini" src="${LOGO}" alt="ADLB" width="48" height="48" />
     </div>
   `;
 }
 
-function bindCopy(btnId, inputId) {
-  const btn = document.getElementById(btnId);
-  const input = document.getElementById(inputId);
-  if (!btn || !input) return;
-  btn.onclick = async () => {
-    await navigator.clipboard.writeText(input.value);
-    btn.textContent = "Copié ✓";
-  };
-}
-
 function renderHome() {
   const defaultYear = YEARS.includes(CURRENT_YEAR) ? CURRENT_YEAR : 2026;
-  const link = appUrl();
   app.innerHTML = `
     <div class="hero">
-      <div class="mark">JU</div>
-      <h1>Justificatifs Ulys</h1>
-      <p>Edouard Clemenceau · dossiers par année et par mois</p>
+      <img class="logo-hero" src="${LOGO}" alt="Adour Dax Landes Basket" width="118" height="118" />
+      <h1>Justificatifs ADLB</h1>
+      <p>Notes de frais Ulys · Adour Dax Landes Basket</p>
     </div>
 
     <div class="card">
-      <p class="muted small" style="margin-top:0">Lien à mettre dans votre Excel (tout le monde peut parcourir et télécharger)</p>
-      <div class="share">
-        <input id="appLink" readonly value="${escapeAttr(link)}" />
-        <button class="btn btn-primary" type="button" id="copyApp">Copier le lien de l’app</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <p class="muted small" style="margin-top:0">Ouvrir un dossier</p>
+      <p class="section-label">Choisir une année</p>
       <div class="year-grid">
         ${YEARS.map(
           (y) => `
@@ -434,10 +417,8 @@ function renderHome() {
         ).join("")}
       </div>
     </div>
-    <p class="footer-note">Parcourez année → mois · consultez les trajets · téléchargez le dossier ZIP complet.</p>
+    <p class="footer-note">Année → mois · consultez les trajets · téléchargez le dossier ZIP.</p>
   `;
-  bindCopy("copyApp", "appLink");
-  // Prefetch silencieux de l'année courante
   monthTotals(defaultYear).catch(() => {});
 }
 
@@ -498,18 +479,18 @@ async function renderMonth(year, month, token = navToken) {
       <div class="stats">
         <div class="stat"><span>Trajets</span><strong>${stats.count}</strong></div>
         <div class="stat"><span>Km</span><strong>${km(stats.total_km)}</strong></div>
-        <div class="stat"><span>Total</span><strong>${euro(stats.total_ttc)}</strong></div>
+        <div class="stat stat-total"><span>Total</span><strong>${euro(stats.total_ttc)}</strong></div>
       </div>
 
       <div class="card">
         <button class="btn btn-primary btn-lg" type="button" id="dlZip" ${stats.count ? "" : "disabled"}>
           Télécharger le dossier complet (ZIP)
         </button>
-        <p class="muted small" style="margin:0.7rem 0 0">Le ZIP contient uniquement les PDF du mois, renommés automatiquement.</p>
+        <p class="muted small" style="margin:0.7rem 0 0">PDF du mois uniquement, renommés automatiquement.</p>
       </div>
 
       <div class="card">
-        <h2 style="margin:0 0 0.75rem;font-size:1.05rem">Reçus du mois</h2>
+        <h2>Reçus du mois</h2>
         ${
           stats.receipts.length
             ? stats.receipts
@@ -520,7 +501,7 @@ async function renderMonth(year, month, token = navToken) {
                 <div class="main">${escapeHtml(r.entree || "?")} → ${escapeHtml(r.sortie || "?")}</div>
                 <div class="amount">${euro(r.prix_ttc)}</div>
               </div>
-              <div class="meta">${escapeHtml(r.date_raw || "—")} · ${km(r.km)} · ${escapeHtml(r.motif || "")}</div>
+              <div class="meta">${escapeHtml(r.date_raw || "—")} · ${km(r.km)}</div>
               <div class="meta" style="margin-top:0.45rem">
                 <button class="btn btn-secondary" type="button" data-dl-pdf="${idx}">Télécharger ce PDF</button>
               </div>
@@ -532,7 +513,7 @@ async function renderMonth(year, month, token = navToken) {
       </div>
 
       <div class="card no-print">
-        <h2 style="margin:0 0 0.75rem;font-size:1.05rem">Ajouter des reçus (Edouard)</h2>
+        <h2>Ajouter des reçus</h2>
         <div class="drop" id="drop">
           <strong>Déposez vos reçus PDF ici</strong>
           <span>ou touchez pour choisir les fichiers</span>
@@ -540,7 +521,7 @@ async function renderMonth(year, month, token = navToken) {
         </div>
         <div class="field">
           <label for="motif">Motif (optionnel)</label>
-          <input id="motif" value="Déplacement professionnel" />
+          <input id="motif" value="Déplacement ADLB" />
         </div>
         <p class="status" id="status"></p>
       </div>
@@ -574,7 +555,7 @@ async function renderMonth(year, month, token = navToken) {
       drop.style.pointerEvents = "none";
       try {
         const motif =
-          document.getElementById("motif").value.trim() || "Déplacement professionnel";
+          document.getElementById("motif").value.trim() || "Déplacement ADLB";
         const ok = await importFiles(fileList, dossier, motif);
         status.className = "status ok";
         status.textContent = `${ok} reçu(s) ajouté(s)`;
