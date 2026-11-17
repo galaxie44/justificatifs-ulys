@@ -155,6 +155,138 @@ async function uploadStorage(path, file) {
   if (!res.ok) throw new Error(await res.text());
 }
 
+async function deleteStorage(path) {
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/receipts/${path}`, {
+    method: "DELETE",
+    headers: headers(),
+  });
+  if (!res.ok && res.status !== 404) throw new Error(await res.text());
+}
+
+async function deleteReceiptRecord(receipt) {
+  await api(`receipts?id=eq.${receipt.id}`, {
+    method: "DELETE",
+    headers: { Prefer: "return=minimal" },
+  });
+  try {
+    await deleteStorage(receipt.stored_filename);
+  } catch (err) {
+    console.warn("Fichier storage non supprimé:", err);
+  }
+}
+
+const ICONS = {
+  eye: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>`,
+  download: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`,
+  trash: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`,
+};
+
+function toast(message, type = "ok") {
+  let host = document.getElementById("toast-host");
+  if (!host) {
+    host = document.createElement("div");
+    host.id = "toast-host";
+    document.body.appendChild(host);
+  }
+  const el = document.createElement("div");
+  el.className = `toast ${type}`;
+  el.textContent = message;
+  host.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("show"));
+  setTimeout(() => {
+    el.classList.remove("show");
+    setTimeout(() => el.remove(), 280);
+  }, 2800);
+}
+
+function closeModal() {
+  document.querySelectorAll(".modal-backdrop").forEach((el) => el.remove());
+}
+
+function openModal({ title, bodyHtml, size = "", onMount }) {
+  closeModal();
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal ${size}" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
+      <div class="modal-head">
+        <h3>${escapeHtml(title)}</h3>
+        <button type="button" class="modal-close" aria-label="Fermer">×</button>
+      </div>
+      <div class="modal-body">${bodyHtml}</div>
+    </div>
+  `;
+  const close = () => backdrop.remove();
+  backdrop.addEventListener("click", (e) => {
+    if (e.target === backdrop) close();
+  });
+  backdrop.querySelector(".modal-close").onclick = close;
+  document.body.appendChild(backdrop);
+  if (onMount) onMount(backdrop, close);
+  return { backdrop, close };
+}
+
+function openPreviewModal(receipt, idx) {
+  const title =
+    `${receipt.entree || "?"} → ${receipt.sortie || "?"}`.slice(0, 60) ||
+    "Aperçu PDF";
+  const url = publicPdfUrl(receipt.stored_filename);
+  openModal({
+    title: "Aperçu du reçu",
+    bodyHtml: `
+      <p class="muted small" style="margin:0 0 0.7rem">${escapeHtml(title)} · ${escapeHtml(receipt.date_raw || "—")}</p>
+      <iframe class="modal-preview-frame" title="Aperçu PDF" src="${escapeHtml(url)}#toolbar=1"></iframe>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" data-close>Fermer</button>
+        <button type="button" class="btn btn-primary" data-dl style="width:auto">Télécharger</button>
+      </div>
+    `,
+    onMount: (backdrop, close) => {
+      backdrop.querySelector("[data-close]").onclick = close;
+      backdrop.querySelector("[data-dl]").onclick = async () => {
+        try {
+          await downloadNamedPdf(receipt, idx);
+          toast("PDF téléchargé");
+        } catch (err) {
+          toast(err.message || "Téléchargement impossible", "err");
+        }
+      };
+    },
+  });
+}
+
+function openDeleteModal(receipt, onConfirm) {
+  const label = `${receipt.entree || "?"} → ${receipt.sortie || "?"}`;
+  openModal({
+    title: "Supprimer ce reçu ?",
+    size: "modal-sm",
+    bodyHtml: `
+      <p>Cette action est définitive. Le PDF sera retiré du dossier.</p>
+      <p class="muted small">${escapeHtml(label)} · ${escapeHtml(receipt.date_raw || "—")} · ${euro(receipt.prix_ttc)}</p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-cancel>Annuler</button>
+        <button type="button" class="btn btn-danger-solid" data-confirm>Supprimer</button>
+      </div>
+    `,
+    onMount: (backdrop, close) => {
+      backdrop.querySelector("[data-cancel]").onclick = close;
+      const confirmBtn = backdrop.querySelector("[data-confirm]");
+      confirmBtn.onclick = async () => {
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = "Suppression…";
+        try {
+          await onConfirm();
+          close();
+        } catch (err) {
+          confirmBtn.disabled = false;
+          confirmBtn.textContent = "Supprimer";
+          toast(err.message || "Suppression impossible", "err");
+        }
+      };
+    },
+  });
+}
+
 function parseUlysText(text) {
   const lines = text
     .split(/\r?\n/)
@@ -298,16 +430,14 @@ async function downloadMonthZip(label, stats, button) {
     a.download = `${safeName(label)}_justificatifs-ulys.zip`;
     a.click();
     URL.revokeObjectURL(a.href);
-    button.textContent = "ZIP téléchargé ✓";
+    button.textContent = old;
+    toast("Dossier ZIP téléchargé");
   } catch (err) {
     console.error(err);
-    alert(err.message || String(err));
+    toast(err.message || String(err), "err");
     button.textContent = old;
   } finally {
     button.disabled = false;
-    setTimeout(() => {
-      if (button.textContent.includes("✓")) button.textContent = old;
-    }, 2000);
   }
 }
 
@@ -495,8 +625,10 @@ async function renderMonth(year, month, token = navToken) {
                 <div class="amount">${euro(r.prix_ttc)}</div>
               </div>
               <div class="meta">${escapeHtml(r.date_raw || "—")} · ${km(r.km)}</div>
-              <div class="meta" style="margin-top:0.45rem">
-                <button class="btn btn-secondary" type="button" data-dl-pdf="${idx}">Télécharger ce PDF</button>
+              <div class="trip-actions">
+                <button class="icon-btn" type="button" data-preview="${idx}" title="Aperçu" aria-label="Aperçu">${ICONS.eye}</button>
+                <button class="icon-btn" type="button" data-dl-pdf="${idx}" title="Télécharger" aria-label="Télécharger">${ICONS.download}</button>
+                <button class="icon-btn danger" type="button" data-delete="${idx}" title="Supprimer" aria-label="Supprimer">${ICONS.trash}</button>
               </div>
             </div>`
                 )
@@ -523,19 +655,38 @@ async function renderMonth(year, month, token = navToken) {
     document.getElementById("dlZip").onclick = (e) =>
       downloadMonthZip(label, stats, e.currentTarget);
 
+    app.querySelectorAll("[data-preview]").forEach((btn) => {
+      btn.onclick = () => {
+        const idx = Number(btn.getAttribute("data-preview"));
+        openPreviewModal(stats.receipts[idx], idx);
+      };
+    });
+
     app.querySelectorAll("[data-dl-pdf]").forEach((btn) => {
       btn.onclick = async () => {
         const idx = Number(btn.getAttribute("data-dl-pdf"));
-        const old = btn.textContent;
         btn.disabled = true;
         try {
           await downloadNamedPdf(stats.receipts[idx], idx);
+          toast("PDF téléchargé");
         } catch (err) {
-          alert(err.message || String(err));
+          toast(err.message || "Téléchargement impossible", "err");
         } finally {
           btn.disabled = false;
-          btn.textContent = old;
         }
+      };
+    });
+
+    app.querySelectorAll("[data-delete]").forEach((btn) => {
+      btn.onclick = () => {
+        const idx = Number(btn.getAttribute("data-delete"));
+        const receipt = stats.receipts[idx];
+        openDeleteModal(receipt, async () => {
+          await deleteReceiptRecord(receipt);
+          invalidateCaches(year, month);
+          toast("Reçu supprimé");
+          route();
+        });
       };
     });
 
@@ -552,10 +703,12 @@ async function renderMonth(year, month, token = navToken) {
         const ok = await importFiles(fileList, dossier, motif);
         status.className = "status ok";
         status.textContent = `${ok} reçu(s) ajouté(s)`;
+        toast(`${ok} reçu(s) ajouté(s)`);
         route();
       } catch (err) {
         status.className = "status err";
         status.textContent = err.message || String(err);
+        toast(err.message || "Import impossible", "err");
         drop.style.pointerEvents = "";
       }
     };
