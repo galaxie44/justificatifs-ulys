@@ -17,12 +17,16 @@ const MOIS = [
   "Novembre",
   "Décembre",
 ];
-
 const YEARS = [2026, 2027];
+const CACHE_TTL_MS = 60_000;
+
 const app = document.getElementById("app");
 const now = new Date();
 const CURRENT_YEAR = now.getFullYear();
 const CURRENT_MONTH = now.getMonth() + 1;
+
+const cache = new Map();
+let navToken = 0;
 
 const euro = (v) =>
   v == null || Number.isNaN(Number(v))
@@ -41,6 +45,26 @@ function headers(extra = {}) {
   };
 }
 
+function cacheGet(key) {
+  const hit = cache.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.at > CACHE_TTL_MS) {
+    cache.delete(key);
+    return null;
+  }
+  return hit.value;
+}
+
+function cacheSet(key, value) {
+  cache.set(key, { at: Date.now(), value });
+  return value;
+}
+
+function invalidateCaches(year, month) {
+  if (year != null) cache.delete(`year:${year}`);
+  if (year != null && month != null) cache.delete(`month:${year}:${month}`);
+}
+
 async function api(path, options = {}) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     ...options,
@@ -56,6 +80,79 @@ async function api(path, options = {}) {
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) return null;
   return res.json();
+}
+
+async function rpc(name, body) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${name}`, {
+    method: "POST",
+    headers: headers({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error((await res.text()) || res.statusText);
+  return res.json();
+}
+
+/** 1 seule requête SQL agrégée pour toute l'année */
+async function monthTotals(year) {
+  const key = `year:${year}`;
+  const cached = cacheGet(key);
+  if (cached) return cached;
+
+  const rows = (await rpc("year_month_stats", { p_year: year })) || [];
+  const out = {};
+  for (const r of rows) {
+    out[r.month] = {
+      id: r.id,
+      count: Number(r.receipt_count) || 0,
+      total: Number(r.total_ttc) || 0,
+    };
+  }
+  return cacheSet(key, out);
+}
+
+/** 1 seule requête : dossier + reçus embarqués */
+async function getMonthBundle(year, month) {
+  const key = `month:${year}:${month}`;
+  const cached = cacheGet(key);
+  if (cached) return cached;
+
+  const rows = await api(
+    `dossiers?year=eq.${year}&month=eq.${month}&select=id,title,description,share_token,year,month,receipts(*)&limit=1`
+  );
+  const dossier = rows?.[0];
+  if (!dossier) throw new Error("Dossier du mois introuvable.");
+
+  const receipts = [...(dossier.receipts || [])].sort((a, b) =>
+    String(a.date_iso || a.created_at || "").localeCompare(
+      String(b.date_iso || b.created_at || "")
+    )
+  );
+  const stats = {
+    count: receipts.length,
+    total_ttc: receipts.reduce((s, r) => s + (r.prix_ttc || 0), 0),
+    total_ht: receipts.reduce((s, r) => s + (r.prix_ht || 0), 0),
+    total_tva: receipts.reduce((s, r) => s + (r.tva || 0), 0),
+    total_km: receipts.reduce((s, r) => s + (r.km || 0), 0),
+    receipts,
+  };
+  const { receipts: _drop, ...dossierMeta } = dossier;
+  return cacheSet(key, { dossier: dossierMeta, stats });
+}
+
+function publicPdfUrl(path) {
+  return `${SUPABASE_URL}/storage/v1/object/public/receipts/${path}`;
+}
+
+async function uploadStorage(path, file) {
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/receipts/${path}`, {
+    method: "POST",
+    headers: {
+      ...headers({ "Content-Type": "application/pdf" }),
+      "x-upsert": "false",
+    },
+    body: file,
+  });
+  if (!res.ok) throw new Error(await res.text());
 }
 
 function parseUlysText(text) {
@@ -94,75 +191,32 @@ function parseUlysText(text) {
   };
 }
 
+let pdfjsPromise = null;
+function loadPdfJs() {
+  if (!pdfjsPromise) {
+    pdfjsPromise = import(
+      "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.8.69/build/pdf.min.mjs"
+    ).then((pdfjsLib) => {
+      pdfjsLib.GlobalWorkerOptions.workerSrc =
+        "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.8.69/build/pdf.worker.min.mjs";
+      return pdfjsLib;
+    });
+  }
+  return pdfjsPromise;
+}
+
 async function extractPdfText(file) {
-  const pdfjsLib = await import(
-    "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.8.69/build/pdf.min.mjs"
-  );
-  pdfjsLib.GlobalWorkerOptions.workerSrc =
-    "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.8.69/build/pdf.worker.min.mjs";
+  const pdfjsLib = await loadPdfJs();
   const data = new Uint8Array(await file.arrayBuffer());
   const pdf = await pdfjsLib.getDocument({ data }).promise;
-  let text = "";
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const content = await page.getTextContent();
-    text += content.items.map((it) => it.str).join("\n") + "\n";
-  }
-  return text;
-}
-
-function publicPdfUrl(path) {
-  return `${SUPABASE_URL}/storage/v1/object/public/receipts/${path}`;
-}
-
-async function uploadStorage(path, file) {
-  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/receipts/${path}`, {
-    method: "POST",
-    headers: {
-      ...headers({ "Content-Type": "application/pdf" }),
-      "x-upsert": "false",
-    },
-    body: file,
-  });
-  if (!res.ok) throw new Error(await res.text());
-}
-
-async function getDossier(year, month) {
-  const rows = await api(
-    `dossiers?year=eq.${year}&month=eq.${month}&select=*&limit=1`
+  const texts = await Promise.all(
+    Array.from({ length: pdf.numPages }, async (_, i) => {
+      const page = await pdf.getPage(i + 1);
+      const content = await page.getTextContent();
+      return content.items.map((it) => it.str).join("\n");
+    })
   );
-  return rows?.[0] || null;
-}
-
-async function getStats(dossierId) {
-  const rows = (await api(`receipts?dossier_id=eq.${dossierId}&select=*`)) || [];
-  rows.sort((a, b) =>
-    String(a.date_iso || a.created_at).localeCompare(String(b.date_iso || b.created_at))
-  );
-  return {
-    count: rows.length,
-    total_ttc: rows.reduce((s, r) => s + (r.prix_ttc || 0), 0),
-    total_ht: rows.reduce((s, r) => s + (r.prix_ht || 0), 0),
-    total_tva: rows.reduce((s, r) => s + (r.tva || 0), 0),
-    total_km: rows.reduce((s, r) => s + (r.km || 0), 0),
-    receipts: rows,
-  };
-}
-
-async function monthTotals(year) {
-  const dossiers =
-    (await api(`dossiers?year=eq.${year}&select=id,month&order=month.asc`)) || [];
-  const out = {};
-  for (const d of dossiers) {
-    const receipts =
-      (await api(`receipts?dossier_id=eq.${d.id}&select=prix_ttc`)) || [];
-    out[d.month] = {
-      id: d.id,
-      count: receipts.length,
-      total: receipts.reduce((s, r) => s + (r.prix_ttc || 0), 0),
-    };
-  }
-  return out;
+  return texts.join("\n");
 }
 
 function appUrl() {
@@ -179,14 +233,12 @@ function escapeHtml(s) {
 function escapeAttr(s) {
   return escapeHtml(s).replaceAll("'", "&#39;");
 }
-
 function safeName(s) {
   return String(s || "fichier")
     .replace(/[\\/:*?"<>|]+/g, "-")
     .replace(/\s+/g, "_")
     .slice(0, 80);
 }
-
 function csvEscape(v) {
   const s = String(v ?? "");
   if (/[;"\n]/.test(s)) return `"${s.replaceAll('"', '""')}"`;
@@ -233,20 +285,23 @@ async function downloadMonthZip(label, stats, button) {
     folder.file("recapitulatif.csv", buildRecapCsv(label, stats));
     folder.file(
       "README.txt",
-      `Justificatifs Ulys — ${label}\nEdouard Clemenceau\n\nContenu :\n- recapitulatif.csv (tableau des trajets)\n- reçus PDF individuels\n`
+      `Justificatifs Ulys — ${label}\nEdouard Clemenceau\n\nContenu :\n- recapitulatif.csv\n- reçus PDF\n`
     );
 
-    let i = 1;
-    for (const r of stats.receipts) {
-      button.textContent = `Téléchargement ${i}/${stats.receipts.length}…`;
-      const res = await fetch(publicPdfUrl(r.stored_filename));
-      if (!res.ok) throw new Error(`Impossible de récupérer ${r.original_filename}`);
-      const blob = await res.blob();
-      const datePart = (r.date_raw || `trajet-${i}`).replace(/[^\d]/g, "-").replace(/-+/g, "-");
-      const name = `${String(i).padStart(2, "0")}_${safeName(datePart)}_${safeName(r.entree)}_vers_${safeName(r.sortie)}.pdf`;
-      folder.file(name, blob);
-      i += 1;
-    }
+    button.textContent = "Téléchargement des PDF…";
+    const blobs = await Promise.all(
+      stats.receipts.map(async (r, idx) => {
+        const res = await fetch(publicPdfUrl(r.stored_filename));
+        if (!res.ok) throw new Error(`Impossible de récupérer ${r.original_filename}`);
+        const blob = await res.blob();
+        const datePart = (r.date_raw || `trajet-${idx + 1}`)
+          .replace(/[^\d]+/g, "-")
+          .replace(/-+/g, "-");
+        const name = `${String(idx + 1).padStart(2, "0")}_${safeName(datePart)}_${safeName(r.entree)}_vers_${safeName(r.sortie)}.pdf`;
+        return { name, blob };
+      })
+    );
+    for (const f of blobs) folder.file(f.name, f.blob);
 
     button.textContent = "Création du ZIP…";
     const content = await zip.generateAsync({ type: "blob" });
@@ -271,38 +326,52 @@ async function downloadMonthZip(label, stats, button) {
 async function importFiles(files, dossier, motif = "Déplacement professionnel") {
   const pdfs = [...files].filter((f) => f?.name?.toLowerCase().endsWith(".pdf"));
   if (!pdfs.length) throw new Error("Choisissez au moins un PDF Ulys.");
-  let ok = 0;
-  for (const file of pdfs) {
-    const text = await extractPdfText(file);
-    const parsed = parseUlysText(text);
-    const stored = `${crypto.randomUUID()}.pdf`;
-    await uploadStorage(stored, file);
-    await api("receipts", {
-      method: "POST",
-      body: JSON.stringify({
+
+  // Parse en parallèle, puis upload/insert
+  const parsedList = await Promise.all(
+    pdfs.map(async (file) => ({
+      file,
+      parsed: parseUlysText(await extractPdfText(file)),
+      stored: `${crypto.randomUUID()}.pdf`,
+    }))
+  );
+
+  await Promise.all(
+    parsedList.map(async ({ file, stored }) => {
+      await uploadStorage(stored, file);
+    })
+  );
+
+  await api("receipts", {
+    method: "POST",
+    body: JSON.stringify(
+      parsedList.map(({ file, parsed, stored }) => ({
         dossier_id: dossier.id,
         stored_filename: stored,
         original_filename: file.name,
         ...parsed,
         motif,
-      }),
-    });
-    ok += 1;
-  }
+      }))
+    ),
+  });
+
   await api(`dossiers?id=eq.${dossier.id}`, {
     method: "PATCH",
     headers: { Prefer: "return=minimal" },
     body: JSON.stringify({ updated_at: new Date().toISOString() }),
   });
-  return ok;
+
+  invalidateCaches(dossier.year, dossier.month);
+  return parsedList.length;
 }
 
 function route() {
+  const token = ++navToken;
   const hash = location.hash.replace(/^#/, "") || "/";
   const month = hash.match(/^\/(\d{4})\/(\d{1,2})$/);
-  if (month) return renderMonth(Number(month[1]), Number(month[2]));
+  if (month) return renderMonth(Number(month[1]), Number(month[2]), token);
   const year = hash.match(/^\/(\d{4})$/);
-  if (year) return renderYear(Number(year[1]));
+  if (year) return renderYear(Number(year[1]), token);
   return renderHome();
 }
 
@@ -362,16 +431,22 @@ function renderHome() {
     <p class="footer-note">Parcourez année → mois · consultez les trajets · téléchargez le dossier ZIP complet.</p>
   `;
   bindCopy("copyApp", "appLink");
+  // Prefetch silencieux de l'année courante
+  monthTotals(defaultYear).catch(() => {});
 }
 
-async function renderYear(year) {
+async function renderYear(year, token = navToken) {
   if (!YEARS.includes(year)) {
     location.hash = "#/";
     return;
   }
-  app.innerHTML = `${brand(String(year), "Chargement des mois…", "#/")}<div class="center muted">Chargement…</div>`;
+  const cached = cacheGet(`year:${year}`);
+  if (!cached) {
+    app.innerHTML = `${brand(String(year), "Chargement…", "#/")}<div class="center muted">Chargement…</div>`;
+  }
   try {
     const totals = await monthTotals(year);
+    if (token !== navToken) return;
     app.innerHTML = `
       ${brand(String(year), "Choisissez un mois pour consulter ou télécharger", "#/")}
       <div class="month-grid">
@@ -388,22 +463,28 @@ async function renderYear(year) {
           .join("")}
       </div>
     `;
+    // Prefetch du mois courant / novembre si données
+    const hot = totals[CURRENT_YEAR === year ? CURRENT_MONTH : 11];
+    if (hot?.count) getMonthBundle(year, CURRENT_YEAR === year ? CURRENT_MONTH : 11).catch(() => {});
   } catch (err) {
+    if (token !== navToken) return;
     app.innerHTML = `${brand(String(year), "Erreur", "#/")}<div class="card status err">${escapeHtml(err.message)}</div>`;
   }
 }
 
-async function renderMonth(year, month) {
+async function renderMonth(year, month, token = navToken) {
   if (!YEARS.includes(year) || month < 1 || month > 12) {
     location.hash = "#/";
     return;
   }
   const label = `${MOIS[month]} ${year}`;
-  app.innerHTML = `${brand(label, "Chargement…", `#/${year}`)}<div class="center muted">Chargement…</div>`;
+  const cached = cacheGet(`month:${year}:${month}`);
+  if (!cached) {
+    app.innerHTML = `${brand(label, "Chargement…", `#/${year}`)}<div class="center muted">Chargement…</div>`;
+  }
   try {
-    const dossier = await getDossier(year, month);
-    if (!dossier) throw new Error("Dossier du mois introuvable.");
-    const stats = await getStats(dossier.id);
+    const { dossier, stats } = await getMonthBundle(year, month);
+    if (token !== navToken) return;
 
     app.innerHTML = `
       ${brand(label, "Consulter · télécharger · ajouter des reçus", `#/${year}`)}
@@ -460,8 +541,8 @@ async function renderMonth(year, month) {
       </div>
     `;
 
-    const dlZip = document.getElementById("dlZip");
-    dlZip.onclick = () => downloadMonthZip(label, stats, dlZip);
+    document.getElementById("dlZip").onclick = (e) =>
+      downloadMonthZip(label, stats, e.currentTarget);
 
     const drop = document.getElementById("drop");
     const input = document.getElementById("files");
@@ -496,6 +577,7 @@ async function renderMonth(year, month) {
       if (e.dataTransfer.files?.length) run(e.dataTransfer.files);
     };
   } catch (err) {
+    if (token !== navToken) return;
     app.innerHTML = `${brand(label, "Erreur", `#/${year}`)}<div class="card status err">${escapeHtml(err.message)}</div>`;
   }
 }
