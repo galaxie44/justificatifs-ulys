@@ -219,19 +219,12 @@ async function extractPdfText(file) {
   return texts.join("\n");
 }
 
-function appUrl() {
-  return `${location.origin}${location.pathname.replace(/\/$/, "")}/`;
-}
-
 function escapeHtml(s) {
   return String(s)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
-}
-function escapeAttr(s) {
-  return escapeHtml(s).replaceAll("'", "&#39;");
 }
 function safeName(s) {
   return String(s || "fichier")
