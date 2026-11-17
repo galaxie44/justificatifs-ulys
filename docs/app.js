@@ -525,7 +525,7 @@ function renderHome() {
     <div class="hero">
       <img class="logo-hero" src="${LOGO}" alt="Adour Dax Landes Basket" width="118" height="118" />
       <h1>Justificatifs ADLB</h1>
-      <p>Notes de frais Ulys · Adour Dax Landes Basket</p>
+      <p>Notes de frais Ulys d’Edouard Clemenceau · Adour Dax Landes Basket</p>
     </div>
 
     <div class="card">
