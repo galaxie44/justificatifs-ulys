@@ -1,13 +1,7 @@
-import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.8.69/build/pdf.min.mjs";
-
-pdfjsLib.GlobalWorkerOptions.workerSrc =
-  "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.8.69/build/pdf.worker.min.mjs";
-
 const SUPABASE_URL = "https://lljycdhijeuizzizuceh.supabase.co";
 const SUPABASE_ANON_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxsanljZGhpamV1aXp6aXp1Y2VoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ5MTgxNzQsImV4cCI6MjExMDQ5NDE3NH0.o-0oRw3lRvU3l_b4jt_LCRNTM7aqQa9ju0jmyOUSpUw";
 
-const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const app = document.getElementById("app");
 
 const euro = (v) =>
@@ -18,6 +12,32 @@ const km = (v) =>
   v == null || Number.isNaN(Number(v))
     ? "—"
     : `${Number(v).toFixed(1).replace(".", ",")} km`;
+
+function headers(extra = {}) {
+  return {
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+    ...extra,
+  };
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    ...options,
+    headers: {
+      ...headers(options.headers || {}),
+      ...(options.body ? { "Content-Type": "application/json", Prefer: "return=representation" } : {}),
+    },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || res.statusText);
+  }
+  if (res.status === 204) return null;
+  const ct = res.headers.get("content-type") || "";
+  if (!ct.includes("application/json")) return null;
+  return res.json();
+}
 
 function token() {
   const arr = new Uint8Array(18);
@@ -68,6 +88,11 @@ function parseUlysText(text, filename) {
 }
 
 async function extractPdfText(file) {
+  const pdfjsLib = await import(
+    "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.8.69/build/pdf.min.mjs"
+  );
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.8.69/build/pdf.worker.min.mjs";
   const data = new Uint8Array(await file.arrayBuffer());
   const pdf = await pdfjsLib.getDocument({ data }).promise;
   let text = "";
@@ -82,45 +107,41 @@ async function extractPdfText(file) {
 function route() {
   const hash = location.hash.replace(/^#/, "") || "/";
   const publicMatch = hash.match(/^\/j\/([^/]+)/);
-  if (publicMatch) return renderPublic(publicMatch[1]);
+  if (publicMatch) return renderPublic(decodeURIComponent(publicMatch[1]));
   const dossierMatch = hash.match(/^\/dossiers\/(\d+)/);
   if (dossierMatch) return renderDossier(Number(dossierMatch[1]));
   return renderHome();
 }
 
 async function listDossiers() {
-  const { data: dossiers, error } = await sb
-    .from("dossiers")
-    .select("*")
-    .order("updated_at", { ascending: false });
-  if (error) throw error;
+  const dossiers =
+    (await api("dossiers?select=*&order=updated_at.desc")) || [];
   const enriched = [];
-  for (const d of dossiers || []) {
-    const { data: receipts } = await sb
-      .from("receipts")
-      .select("prix_ttc, km")
-      .eq("dossier_id", d.id);
+  for (const d of dossiers) {
+    const receipts =
+      (await api(`receipts?dossier_id=eq.${d.id}&select=prix_ttc,km`)) || [];
     enriched.push({
       ...d,
-      receipt_count: receipts?.length || 0,
-      total_ttc: (receipts || []).reduce((s, r) => s + (r.prix_ttc || 0), 0),
+      receipt_count: receipts.length,
+      total_ttc: receipts.reduce((s, r) => s + (r.prix_ttc || 0), 0),
     });
   }
   return enriched;
 }
 
 async function getStats(dossierId) {
-  const { data } = await sb.from("receipts").select("*").eq("dossier_id", dossierId);
-  const rows = data || [];
+  const rows =
+    (await api(`receipts?dossier_id=eq.${dossierId}&select=*`)) || [];
+  rows.sort((a, b) =>
+    String(a.date_iso || a.created_at).localeCompare(String(b.date_iso || b.created_at))
+  );
   return {
     count: rows.length,
     total_ttc: rows.reduce((s, r) => s + (r.prix_ttc || 0), 0),
     total_ht: rows.reduce((s, r) => s + (r.prix_ht || 0), 0),
     total_tva: rows.reduce((s, r) => s + (r.tva || 0), 0),
     total_km: rows.reduce((s, r) => s + (r.km || 0), 0),
-    receipts: rows.sort((a, b) =>
-      String(a.date_iso || a.created_at).localeCompare(String(b.date_iso || b.created_at))
-    ),
+    receipts: rows,
   };
 }
 
@@ -164,7 +185,7 @@ async function renderHome() {
                     .map(
                       (d) => `<tr>
                     <td><a href="#/dossiers/${d.id}"><strong>${escapeHtml(d.title)}</strong></a>
-                      ${d.description ? `<div class="muted small">${escapeHtml(d.description.slice(0, 80))}</div>` : ""}
+                      ${d.description ? `<div class="muted small">${escapeHtml(String(d.description).slice(0, 80))}</div>` : ""}
                     </td>
                     <td><span class="pill">${d.receipt_count}</span></td>
                     <td>${euro(d.total_ttc)}</td>
@@ -190,44 +211,48 @@ async function renderHome() {
     document.getElementById("createForm").onsubmit = async (e) => {
       e.preventDefault();
       const fd = new FormData(e.target);
-      const { data, error } = await sb
-        .from("dossiers")
-        .insert({
+      const rows = await api("dossiers", {
+        method: "POST",
+        body: JSON.stringify({
           title: String(fd.get("title")).trim(),
           description: String(fd.get("description") || "").trim(),
           share_token: token(),
-        })
-        .select()
-        .single();
-      if (error) return alert(error.message);
-      location.hash = `#/dossiers/${data.id}`;
+        }),
+      });
+      location.hash = `#/dossiers/${rows[0].id}`;
     };
   } catch (err) {
-    shell("Justificatifs Ulys", "Erreur", `<div class="error">${escapeHtml(err.message)}</div>`);
+    shell(
+      "Justificatifs Ulys",
+      "Erreur",
+      `<div class="error">${escapeHtml(err.message || String(err))}</div>`
+    );
   }
 }
 
 async function renderDossier(id) {
-  shell("Dossier", "Chargement…", `<div class="empty">Chargement…</div>`);
-  const { data: dossier, error } = await sb.from("dossiers").select("*").eq("id", id).single();
-  if (error || !dossier) {
-    shell("Introuvable", "", `<div class="error">Dossier introuvable. <a href="#/">Retour</a></div>`);
-    return;
-  }
-  const stats = await getStats(id);
-  const shareUrl = `${location.origin}${location.pathname}#/j/${dossier.share_token}`;
+  shell("Dossier", `<a href="#/">← Retour</a>`, `<div class="empty">Chargement…</div>`);
+  try {
+    const dossiers = await api(`dossiers?id=eq.${id}&select=*`);
+    const dossier = dossiers?.[0];
+    if (!dossier) {
+      shell("Introuvable", "", `<div class="error">Dossier introuvable. <a href="#/">Retour</a></div>`);
+      return;
+    }
+    const stats = await getStats(id);
+    const shareUrl = `${location.origin}${location.pathname.replace(/\/$/, "")}/#/j/${dossier.share_token}`;
 
-  shell(
-    escapeHtml(dossier.title),
-    `<a href="#/">← Tous les dossiers</a>`,
-    `
+    shell(
+      escapeHtml(dossier.title),
+      `<a href="#/">← Tous les dossiers</a>`,
+      `
     <div class="notice">Partagez le lien ci-dessous. Aucun accès au compte Ulys n’est requis.</div>
     <section class="card" style="margin-bottom:1rem">
       <h2 style="margin-top:0">Lien public de justification</h2>
       <div class="share-box">
         <input id="shareUrl" readonly value="${escapeAttr(shareUrl)}" />
         <button class="btn btn-secondary" type="button" id="copyBtn">Copier</button>
-        <a class="btn btn-accent" href="#/j/${dossier.share_token}" target="_blank">Voir le justificatif</a>
+        <a class="btn btn-accent" href="#/j/${escapeAttr(dossier.share_token)}">Voir le justificatif</a>
       </div>
     </section>
     <div class="stats">
@@ -239,7 +264,6 @@ async function renderDossier(id) {
     <div class="grid-2">
       <section class="card">
         <h2 style="margin-top:0">Ajouter des reçus Ulys (PDF)</h2>
-        <p class="muted small">Extraction automatique de la date, trajet, km et montants.</p>
         <form id="uploadForm">
           <div class="field"><label>Fichiers PDF</label><input name="files" type="file" accept="application/pdf,.pdf" multiple required /></div>
           <div class="field"><label>Motif par défaut</label><input name="motif" placeholder="Déplacement professionnel" /></div>
@@ -280,133 +304,161 @@ async function renderDossier(id) {
                   </form>
                 </td>
                 <td><a href="${publicPdfUrl(r.stored_filename)}" target="_blank" rel="noopener">PDF</a></td>
-                <td><button class="btn btn-danger" data-del="${r.id}" type="button">×</button></td>
+                <td><button class="btn btn-danger" data-del="${r.id}" data-file="${escapeAttr(r.stored_filename)}" type="button">×</button></td>
               </tr>`
                 )
                 .join("")}
             </tbody></table></div>`
           : `<div class="empty">Importez vos PDF Ulys pour constituer le justificatif.</div>`
       }
-    </section>`,
-    ""
-  );
+    </section>`
+    );
 
-  document.getElementById("copyBtn").onclick = async () => {
-    await navigator.clipboard.writeText(shareUrl);
-    document.getElementById("copyBtn").textContent = "Copié";
-  };
+    document.getElementById("copyBtn").onclick = async () => {
+      await navigator.clipboard.writeText(shareUrl);
+      document.getElementById("copyBtn").textContent = "Copié";
+    };
 
-  document.getElementById("editForm").onsubmit = async (e) => {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    await sb
-      .from("dossiers")
-      .update({
-        title: String(fd.get("title")).trim(),
-        description: String(fd.get("description") || "").trim(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", id);
-    route();
-  };
-
-  document.getElementById("deleteDossier").onclick = async () => {
-    if (!confirm("Supprimer ce dossier et tous ses PDF ?")) return;
-    for (const r of stats.receipts) {
-      await sb.storage.from("receipts").remove([r.stored_filename]);
-    }
-    await sb.from("dossiers").delete().eq("id", id);
-    location.hash = "#/";
-  };
-
-  document.querySelectorAll("form.motif-inline").forEach((form) => {
-    form.onsubmit = async (e) => {
+    document.getElementById("editForm").onsubmit = async (e) => {
       e.preventDefault();
-      const rid = Number(form.dataset.id);
-      await sb.from("receipts").update({ motif: form.motif.value.trim() }).eq("id", rid);
+      const fd = new FormData(e.target);
+      await api(`dossiers?id=eq.${id}`, {
+        method: "PATCH",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({
+          title: String(fd.get("title")).trim(),
+          description: String(fd.get("description") || "").trim(),
+          updated_at: new Date().toISOString(),
+        }),
+      });
       route();
     };
-  });
 
-  document.querySelectorAll("[data-del]").forEach((btn) => {
-    btn.onclick = async () => {
-      if (!confirm("Supprimer ce reçu ?")) return;
-      const rid = Number(btn.dataset.del);
-      const r = stats.receipts.find((x) => x.id === rid);
-      if (r) await sb.storage.from("receipts").remove([r.stored_filename]);
-      await sb.from("receipts").delete().eq("id", rid);
-      route();
-    };
-  });
-
-  document.getElementById("uploadForm").onsubmit = async (e) => {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    const files = [...fd.getAll("files")].filter((f) => f && f.name);
-    const motif = String(fd.get("motif") || "").trim();
-    const status = document.getElementById("uploadStatus");
-    let ok = 0;
-    for (const file of files) {
-      status.textContent = `Analyse de ${file.name}…`;
-      if (!file.name.toLowerCase().endsWith(".pdf")) continue;
-      try {
-        const text = await extractPdfText(file);
-        const parsed = parseUlysText(text, file.name);
-        const stored = `${crypto.randomUUID()}.pdf`;
-        const { error: upErr } = await sb.storage
-          .from("receipts")
-          .upload(stored, file, { contentType: "application/pdf", upsert: false });
-        if (upErr) throw upErr;
-        const { error: insErr } = await sb.from("receipts").insert({
-          dossier_id: id,
-          stored_filename: stored,
-          original_filename: file.name,
-          date_raw: parsed.date_raw,
-          date_iso: parsed.date_iso,
-          entree: parsed.entree,
-          sortie: parsed.sortie,
-          km: parsed.km,
-          classe_tarif: parsed.classe_tarif,
-          prix_ht: parsed.prix_ht,
-          tva: parsed.tva,
-          prix_ttc: parsed.prix_ttc,
-          formule: parsed.formule,
-          badge: parsed.badge,
-          motif,
-        });
-        if (insErr) throw insErr;
-        ok += 1;
-      } catch (err) {
-        console.error(err);
-        status.textContent = `Erreur sur ${file.name}: ${err.message || err}`;
+    document.getElementById("deleteDossier").onclick = async () => {
+      if (!confirm("Supprimer ce dossier et tous ses PDF ?")) return;
+      for (const r of stats.receipts) {
+        await deleteStorage(r.stored_filename);
       }
-    }
-    await sb.from("dossiers").update({ updated_at: new Date().toISOString() }).eq("id", id);
-    status.textContent = `${ok} reçu(s) importé(s).`;
-    route();
-  };
+      await api(`dossiers?id=eq.${id}`, { method: "DELETE" });
+      location.hash = "#/";
+    };
+
+    document.querySelectorAll("form.motif-inline").forEach((form) => {
+      form.onsubmit = async (e) => {
+        e.preventDefault();
+        const rid = Number(form.dataset.id);
+        await api(`receipts?id=eq.${rid}`, {
+          method: "PATCH",
+          headers: { Prefer: "return=minimal" },
+          body: JSON.stringify({ motif: form.motif.value.trim() }),
+        });
+        route();
+      };
+    });
+
+    document.querySelectorAll("[data-del]").forEach((btn) => {
+      btn.onclick = async () => {
+        if (!confirm("Supprimer ce reçu ?")) return;
+        await deleteStorage(btn.dataset.file);
+        await api(`receipts?id=eq.${btn.dataset.del}`, { method: "DELETE" });
+        route();
+      };
+    });
+
+    document.getElementById("uploadForm").onsubmit = async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const files = [...fd.getAll("files")].filter((f) => f && f.name);
+      const motif = String(fd.get("motif") || "").trim();
+      const status = document.getElementById("uploadStatus");
+      let ok = 0;
+      for (const file of files) {
+        status.textContent = `Analyse de ${file.name}…`;
+        if (!file.name.toLowerCase().endsWith(".pdf")) continue;
+        try {
+          const text = await extractPdfText(file);
+          const parsed = parseUlysText(text, file.name);
+          const stored = `${crypto.randomUUID()}.pdf`;
+          await uploadStorage(stored, file);
+          await api("receipts", {
+            method: "POST",
+            body: JSON.stringify({
+              dossier_id: id,
+              stored_filename: stored,
+              original_filename: file.name,
+              date_raw: parsed.date_raw,
+              date_iso: parsed.date_iso,
+              entree: parsed.entree,
+              sortie: parsed.sortie,
+              km: parsed.km,
+              classe_tarif: parsed.classe_tarif,
+              prix_ht: parsed.prix_ht,
+              tva: parsed.tva,
+              prix_ttc: parsed.prix_ttc,
+              formule: parsed.formule,
+              badge: parsed.badge,
+              motif,
+            }),
+          });
+          ok += 1;
+        } catch (err) {
+          console.error(err);
+          status.textContent = `Erreur sur ${file.name}: ${err.message || err}`;
+        }
+      }
+      await api(`dossiers?id=eq.${id}`, {
+        method: "PATCH",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({ updated_at: new Date().toISOString() }),
+      });
+      status.textContent = `${ok} reçu(s) importé(s).`;
+      route();
+    };
+  } catch (err) {
+    shell("Erreur", `<a href="#/">Retour</a>`, `<div class="error">${escapeHtml(err.message || String(err))}</div>`);
+  }
 }
 
 function publicPdfUrl(path) {
   return `${SUPABASE_URL}/storage/v1/object/public/receipts/${path}`;
 }
 
+async function uploadStorage(path, file) {
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/receipts/${path}`, {
+    method: "POST",
+    headers: {
+      ...headers({ "Content-Type": "application/pdf" }),
+      "x-upsert": "false",
+    },
+    body: file,
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+async function deleteStorage(path) {
+  await fetch(`${SUPABASE_URL}/storage/v1/object/receipts`, {
+    method: "DELETE",
+    headers: headers({ "Content-Type": "application/json" }),
+    body: JSON.stringify([path]),
+  });
+}
+
 async function renderPublic(shareToken) {
   shell("Justificatif", "Chargement…", `<div class="empty">Chargement…</div>`);
-  const { data: dossier } = await sb
-    .from("dossiers")
-    .select("*")
-    .eq("share_token", shareToken)
-    .single();
-  if (!dossier) {
-    shell("Lien invalide", "", `<div class="error">Ce justificatif est introuvable.</div>`);
-    return;
-  }
-  const stats = await getStats(dossier.id);
-  shell(
-    "Justificatif de frais de péage",
-    "Document partagé · aucune connexion Ulys requise",
-    `
+  try {
+    const dossiers = await api(
+      `dossiers?share_token=eq.${encodeURIComponent(shareToken)}&select=*`
+    );
+    const dossier = dossiers?.[0];
+    if (!dossier) {
+      shell("Lien invalide", "", `<div class="error">Ce justificatif est introuvable.</div>`);
+      return;
+    }
+    const stats = await getStats(dossier.id);
+    shell(
+      "Justificatif de frais de péage",
+      "Document partagé · aucune connexion Ulys requise",
+      `
     <section class="card">
       <h2 style="margin:0 0 0.35rem">${escapeHtml(dossier.title)}</h2>
       ${dossier.description ? `<p class="muted" style="white-space:pre-wrap;margin-top:0">${escapeHtml(dossier.description)}</p>` : ""}
@@ -441,11 +493,13 @@ async function renderPublic(shareToken) {
       }
     </section>
     <p class="muted small" style="margin-top:1rem">
-      Montants issus des reçus informatifs Ulys. La facture mensuelle Ulys reste la référence comptable.
-      Ce lien ne donne aucun accès au compte Ulys du titulaire.
+      Montants issus des reçus informatifs Ulys. Ce lien ne donne aucun accès au compte Ulys.
     </p>`,
-    `<button class="btn btn-ghost no-print" type="button" onclick="window.print()">Imprimer</button>`
-  );
+      `<button class="btn btn-ghost no-print" type="button" onclick="window.print()">Imprimer</button>`
+    );
+  } catch (err) {
+    shell("Erreur", "", `<div class="error">${escapeHtml(err.message || String(err))}</div>`);
+  }
 }
 
 function escapeHtml(s) {
