@@ -237,37 +237,35 @@ function safeName(s) {
   return String(s || "fichier")
     .replace(/[\\/:*?"<>|]+/g, "-")
     .replace(/\s+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "")
     .slice(0, 80);
 }
-function csvEscape(v) {
-  const s = String(v ?? "");
-  if (/[;"\n]/.test(s)) return `"${s.replaceAll('"', '""')}"`;
-  return s;
-}
 
-function buildRecapCsv(label, stats) {
-  const lines = [
-    ["Dossier", label],
-    ["Trajets", stats.count],
-    ["Km", stats.total_km],
-    ["Total HT", stats.total_ht],
-    ["Total TVA", stats.total_tva],
-    ["Total TTC", stats.total_ttc],
-    [],
-    ["Date", "Entrée", "Sortie", "Km", "HT", "TVA", "TTC", "Motif", "Fichier"],
-    ...stats.receipts.map((r) => [
-      r.date_raw || "",
-      r.entree || "",
-      r.sortie || "",
-      r.km ?? "",
-      r.prix_ht ?? "",
-      r.tva ?? "",
-      r.prix_ttc ?? "",
-      r.motif || "",
-      r.original_filename || "",
-    ]),
+/** Nom lisible : 01_2026-11-15_A11-Angers_vers_A11-Nantes_9.80e.pdf */
+function receiptPdfName(r, idx = 0) {
+  let datePart = "";
+  if (r.date_iso) {
+    datePart = r.date_iso.slice(0, 10);
+  } else if (r.date_raw) {
+    const m = String(r.date_raw).match(/(\d{2})\/(\d{2})\/(\d{4})/);
+    datePart = m ? `${m[3]}-${m[2]}-${m[1]}` : safeName(r.date_raw);
+  } else {
+    datePart = `trajet-${idx + 1}`;
+  }
+  const from = safeName(r.entree || "entree") || "entree";
+  const to = safeName(r.sortie || "sortie") || "sortie";
+  const amount =
+    r.prix_ttc != null && !Number.isNaN(Number(r.prix_ttc))
+      ? `${Number(r.prix_ttc).toFixed(2)}e`
+      : "";
+  const parts = [
+    String(idx + 1).padStart(2, "0"),
+    datePart,
+    `${from}_vers_${to}`,
   ];
-  return "\uFEFF" + lines.map((row) => row.map(csvEscape).join(";")).join("\n");
+  if (amount) parts.push(amount);
+  return `${parts.join("_")}.pdf`;
 }
 
 async function downloadMonthZip(label, stats, button) {
@@ -282,22 +280,19 @@ async function downloadMonthZip(label, stats, button) {
     const JSZip = (await import("https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm")).default;
     const zip = new JSZip();
     const folder = zip.folder(safeName(label));
-    folder.file("recapitulatif.csv", buildRecapCsv(label, stats));
-    folder.file(
-      "README.txt",
-      `Justificatifs Ulys — ${label}\nEdouard Clemenceau\n\nContenu :\n- recapitulatif.csv\n- reçus PDF\n`
-    );
 
     button.textContent = "Téléchargement des PDF…";
+    const used = new Set();
     const blobs = await Promise.all(
       stats.receipts.map(async (r, idx) => {
         const res = await fetch(publicPdfUrl(r.stored_filename));
-        if (!res.ok) throw new Error(`Impossible de récupérer ${r.original_filename}`);
+        if (!res.ok) throw new Error(`Impossible de récupérer le PDF n°${idx + 1}`);
         const blob = await res.blob();
-        const datePart = (r.date_raw || `trajet-${idx + 1}`)
-          .replace(/[^\d]+/g, "-")
-          .replace(/-+/g, "-");
-        const name = `${String(idx + 1).padStart(2, "0")}_${safeName(datePart)}_${safeName(r.entree)}_vers_${safeName(r.sortie)}.pdf`;
+        let name = receiptPdfName(r, idx);
+        if (used.has(name)) {
+          name = name.replace(/\.pdf$/i, `_${idx + 1}.pdf`);
+        }
+        used.add(name);
         return { name, blob };
       })
     );
@@ -321,6 +316,17 @@ async function downloadMonthZip(label, stats, button) {
       if (button.textContent.includes("✓")) button.textContent = old;
     }, 2000);
   }
+}
+
+async function downloadNamedPdf(r, idx) {
+  const res = await fetch(publicPdfUrl(r.stored_filename));
+  if (!res.ok) throw new Error("Téléchargement impossible");
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = receiptPdfName(r, idx);
+  a.click();
+  URL.revokeObjectURL(a.href);
 }
 
 async function importFiles(files, dossier, motif = "Déplacement professionnel") {
@@ -500,7 +506,7 @@ async function renderMonth(year, month, token = navToken) {
         <button class="btn btn-primary btn-lg" type="button" id="dlZip" ${stats.count ? "" : "disabled"}>
           Télécharger le dossier complet (ZIP)
         </button>
-        <p class="muted small" style="margin:0.7rem 0 0">Le ZIP contient tous les PDF du mois + un récapitulatif CSV.</p>
+        <p class="muted small" style="margin:0.7rem 0 0">Le ZIP contient uniquement les PDF du mois, renommés automatiquement.</p>
       </div>
 
       <div class="card">
@@ -509,7 +515,7 @@ async function renderMonth(year, month, token = navToken) {
           stats.receipts.length
             ? stats.receipts
                 .map(
-                  (r) => `
+                  (r, idx) => `
             <div class="trip">
               <div class="row">
                 <div class="main">${escapeHtml(r.entree || "?")} → ${escapeHtml(r.sortie || "?")}</div>
@@ -517,7 +523,7 @@ async function renderMonth(year, month, token = navToken) {
               </div>
               <div class="meta">${escapeHtml(r.date_raw || "—")} · ${km(r.km)} · ${escapeHtml(r.motif || "")}</div>
               <div class="meta" style="margin-top:0.45rem">
-                <a class="btn btn-secondary" href="${publicPdfUrl(r.stored_filename)}" target="_blank" rel="noopener" download>Télécharger ce PDF</a>
+                <button class="btn btn-secondary" type="button" data-dl-pdf="${idx}">Télécharger ce PDF</button>
               </div>
             </div>`
                 )
@@ -543,6 +549,22 @@ async function renderMonth(year, month, token = navToken) {
 
     document.getElementById("dlZip").onclick = (e) =>
       downloadMonthZip(label, stats, e.currentTarget);
+
+    app.querySelectorAll("[data-dl-pdf]").forEach((btn) => {
+      btn.onclick = async () => {
+        const idx = Number(btn.getAttribute("data-dl-pdf"));
+        const old = btn.textContent;
+        btn.disabled = true;
+        try {
+          await downloadNamedPdf(stats.receipts[idx], idx);
+        } catch (err) {
+          alert(err.message || String(err));
+        } finally {
+          btn.disabled = false;
+          btn.textContent = old;
+        }
+      };
+    });
 
     const drop = document.getElementById("drop");
     const input = document.getElementById("files");
